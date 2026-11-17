@@ -30,6 +30,18 @@ echo "ls -la" | .\target\release\wren.exe --batch
 > 只有显式传入 `--batch`（或 `-b`）才走批处理模式。若崩溃，错误信息会写入
 > `%TEMP%\wren_panic.log`，便于排查。
 
+### 安装（MSI）与 Windows Terminal 集成
+
+从 [Releases](https://github.com/fengqshanl/WrenTerminal/releases) 下载 `Wren-*-x64.msi` 双击安装即可。安装程序会：
+
+- 把 `wren.exe` 安装到 `C:\Program Files\Wren` 并加入系统 PATH
+- 创建开始菜单与桌面快捷方式
+- **自动把 "Wren Terminal" 注册为 Windows Terminal 的一个 profile**（正式版与预览版都支持，所有用户账户）——安装完后新开一个 Terminal 标签页，下拉菜单里就能直接选到 Wren，无需手动执行任何脚本
+- 卸载时自动清理该 profile
+
+> 这个自动集成由 MSI 内置的自定义操作完成（安装时以 SYSTEM 权限遍历各用户的 Terminal 配置），对应的脚本是 `installer/staging/wren-terminal-profile.ps1`；日志写在 `%TEMP%\wren-terminal-profile.log`。
+> 如果你用的是免安装的绿色版（直接拷 `wren.exe`），可以手动运行该脚本：`powershell -ExecutionPolicy Bypass -File wren-terminal-profile.ps1 -Mode Install`。
+
 进入后你会看到熟悉的提示符：
 
 ```

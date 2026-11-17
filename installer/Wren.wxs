@@ -51,6 +51,8 @@
               DiskId="1" />
             <File Id="README.md" Name="README.md" Source="staging\README.md" DiskId="1" />
             <File Id="run.bat" Name="run.bat" Source="staging\run.bat" DiskId="1" />
+            <File Id="WrenIco" Name="wren.ico" Source="staging\wren.ico" DiskId="1" />
+            <File Id="TerminalProfileScript" Name="wren-terminal-profile.ps1" Source="staging\wren-terminal-profile.ps1" DiskId="1" />
 
             <!-- PATH 环境变量：把安装目录加入系统 PATH -->
             <Environment
@@ -130,5 +132,38 @@
       <ComponentRef Id="StartMenuShortcuts" />
       <ComponentRef Id="DesktopShortcut" />
     </Feature>
+
+    <!-- ================= 自动集成 Windows Terminal ================= -->
+    <!-- 安装时：以 SYSTEM 权限遍历所有用户，把 Wren 注入 Windows Terminal profile -->
+    <CustomAction Id="SetWrenInstallCmd"
+                  Property="RunWrenProfileInstall"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]wren-terminal-profile.ps1&quot; -Mode Install" />
+    <CustomAction Id="RunWrenProfileInstall"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- 卸载时：清理所有用户 Terminal 里的 Wren profile -->
+    <CustomAction Id="SetWrenUninstallCmd"
+                  Property="RunWrenProfileUninstall"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]wren-terminal-profile.ps1&quot; -Mode Uninstall" />
+    <CustomAction Id="RunWrenProfileUninstall"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- 卸载：在文件被删除前运行（脚本还在） -->
+      <Custom Action="SetWrenUninstallCmd" Before="RemoveFiles">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <Custom Action="RunWrenProfileUninstall" After="SetWrenUninstallCmd">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+
+      <!-- 安装/升级：在文件复制完成后运行（脚本已就位） -->
+      <Custom Action="SetWrenInstallCmd" After="InstallFiles">NOT REMOVE~="ALL"</Custom>
+      <Custom Action="RunWrenProfileInstall" After="SetWrenInstallCmd">NOT REMOVE~="ALL"</Custom>
+    </InstallExecuteSequence>
   </Product>
 </Wix>
