@@ -37,6 +37,7 @@ jobs:
           Copy-Item target/release/wren.exe installer/staging/
           Copy-Item README.md installer/staging/
           Copy-Item run.bat installer/staging/
+          # wren.ico 与 wren-terminal-profile.ps1 已在仓库 staging 目录中，无需复制
 
       - name: Compile MSI
         shell: pwsh
@@ -44,7 +45,7 @@ jobs:
           $wix = "$PWD\.wix-tools\wix\tools"
           & "$wix\candle.exe" -nologo -out installer/Wren.wixobj installer/Wren.wxs
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
-          & "$wix\light.exe" -nologo -ext WixUIExtension -out installer/Wren.msi installer/Wren.wixobj
+          & "$wix\light.exe" -nologo -ext WixUIExtension -ext WixUtilExtension -out installer/Wren.msi installer/Wren.wixobj
           if ($LASTEXITCODE -ne 0) { throw "light failed" }
 
       - name: Rename MSI with version
