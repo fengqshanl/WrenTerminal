@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <!-- ================= 产品定义 ================= -->
+  <Product
+    Id="*"
+    Name="Wren - Linux-style shell on Windows"
+    Language="1033"
+    Version="0.1.0.0"
+    Manufacturer="Wren Terminal"
+    UpgradeCode="A7E4C1D2-9F3B-4E68-B2A1-6D0C5E8F7A31">
+
+    <Package
+      InstallerVersion="200"
+      Compressed="yes"
+      Platform="x64"
+      InstallScope="perMachine"
+      Description="Wren - A lightweight Linux-style command-line compatibility shell for Windows"
+      Manufacturer="Wren Terminal"
+      Keywords="shell, linux, terminal, cli, windows" />
+
+    <!-- 媒体模板：生成单个 CAB，压缩进 MSI -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ================= 升级策略 ================= -->
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of Wren is already installed." />
+
+    <!-- ================= 安装界面 ================= -->
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+    <WixVariable Id="WixUILicenseRtf" Value="licenses\License.rtf" />
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- 允许"修复/卸载"出现在控制面板 -->
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/fengqshanl/WrenTerminal" />
+    <Property Id="ARPPRODUCTICON" Value="WrenIcon" />
+
+    <!-- ================= 目录结构 ================= -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Wren">
+          <Component Id="MainExecutable" Guid="2C1B9E7A-4D63-4F81-9A52-7E3C1B8D0F44" Win64="yes">
+            <File
+              Id="wren.exe"
+              Name="wren.exe"
+              Source="staging\wren.exe"
+              KeyPath="yes"
+              DiskId="1" />
+            <File Id="README.md" Name="README.md" Source="staging\README.md" DiskId="1" />
+            <File Id="run.bat" Name="run.bat" Source="staging\run.bat" DiskId="1" />
+
+            <!-- PATH 环境变量：把安装目录加入系统 PATH -->
+            <Environment
+              Id="WrenPath"
+              Name="PATH"
+              Value="[INSTALLFOLDER]"
+              Permanent="no"
+              Part="last"
+              Action="set"
+              System="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <!-- 开始菜单目录 -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Wren" />
+      </Directory>
+
+      <!-- 桌面目录 -->
+      <Directory Id="DesktopFolder" Name="Desktop" />
+    </Directory>
+
+    <!-- ================= 开始菜单快捷方式 ================= -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcuts" Guid="5F8A2C19-7B34-4E56-A901-3C2D8E4F1B67" Win64="yes">
+        <Shortcut
+          Id="WrenStartMenu"
+          Name="Wren Terminal"
+          Description="Linux-style shell on Windows"
+          Target="[INSTALLFOLDER]wren.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="WrenIcon" />
+        <Shortcut
+          Id="WrenUninstall"
+          Name="Uninstall Wren"
+          Target="[SystemFolder]msiexec.exe"
+          Arguments="/x [ProductCode]"
+          Description="Uninstall Wren" />
+        <RemoveFolder Id="CleanUpAppFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\WrenTerminal\Wren"
+          Name="startmenu"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- ================= 桌面快捷方式 ================= -->
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="9D3E7B42-1A85-4C6F-B0D2-8E5A1F4C7D93" Win64="yes">
+        <Shortcut
+          Id="WrenDesktop"
+          Name="Wren Terminal"
+          Description="Linux-style shell on Windows"
+          Target="[INSTALLFOLDER]wren.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="WrenIcon" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\WrenTerminal\Wren"
+          Name="desktop"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- ================= 图标 ================= -->
+    <Icon Id="WrenIcon" SourceFile="staging\wren.ico" />
+
+    <!-- ================= Feature ================= -->
+    <Feature Id="MainFeature" Title="Wren" Level="1" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcuts" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+  </Product>
+</Wix>

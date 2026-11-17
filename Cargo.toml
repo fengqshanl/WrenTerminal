@@ -1,0 +1,16 @@
+[package]
+name = "wren"
+version = "0.1.0"
+edition = "2021"
+description = "Wren - A lightweight Linux-style command-line compatibility shell for Windows, written in Rust."
+authors = ["Wren contributors"]
+
+[dependencies]
+# 行编辑 / 历史 / Tab 补全，让交互体验接近 bash/readline
+rustyline = { version = "14", features = ["with-file-history"] }
+# 跨平台彩色输出
+colored = "2"
+
+[profile.release]
+opt-level = 2
+strip = true
