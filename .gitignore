@@ -12,8 +12,10 @@ installer/*.wixpdb
 installer/_verify/
 installer/verify.msi
 
-# MSI 安装包本体（较大，作为 GitHub Release 资产发布，不入库）
-*.msi
+# MSI：构建中间产物不入库，但 releases/ 下的正式发布包保留供直接下载
+/*.msi
+installer/*.msi
+!releases/*.msi
 
 # 工作区内部记忆（不应提交到公开仓库）
 /.workbuddy/

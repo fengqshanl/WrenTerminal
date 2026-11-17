@@ -1,0 +1,80 @@
+name: Release MSI
+
+# 推送 v* 标签（如 v0.1.0）时自动构建 MSI 并发布到 GitHub Releases
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Download WiX Toolset 3.14
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .wix-tools | Out-Null
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/wix/3.14.1" -OutFile .wix-tools/wix.nupkg
+          Expand-Archive -Path .wix-tools/wix.nupkg -DestinationPath .wix-tools/wix -Force
+
+      - name: Stage installer files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installer/staging | Out-Null
+          Copy-Item target/release/wren.exe installer/staging/
+          Copy-Item README.md installer/staging/
+          Copy-Item run.bat installer/staging/
+
+      - name: Compile MSI
+        shell: pwsh
+        run: |
+          $wix = "$PWD\.wix-tools\wix\tools"
+          & "$wix\candle.exe" -nologo -out installer/Wren.wixobj installer/Wren.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle failed" }
+          & "$wix\light.exe" -nologo -ext WixUIExtension -out installer/Wren.msi installer/Wren.wixobj
+          if ($LASTEXITCODE -ne 0) { throw "light failed" }
+
+      - name: Rename MSI with version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Copy-Item installer/Wren.msi "Wren-$tag-x64.msi"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Wren ${{ github.ref_name }}"
+          body: |
+            ## Wren ${{ github.ref_name }} — Linux-style shell on Windows
+
+            轻量、无 WSL 依赖的 Windows Linux 风格命令行兼容层。
+
+            ### 下载
+            - **Wren-${{ github.ref_name }}-x64.msi** — Windows x64 安装包
+              （自动安装到 Program Files、创建开始菜单/桌面快捷方式、加入 PATH）
+
+            ### 主要功能
+            - Rust 原生实现 35+ Linux 常用命令
+            - 管道 `|`、重定向 `> >> <`、连接符 `&& || ;`
+            - Linux → Windows 命令自动翻译
+            - Linux 风格环境变量与 PATH 同步
+            - Tab 补全、历史记录、彩色提示符
+
+            详见 [README](https://github.com/fengqshanl/WrenTerminal/blob/main/README.md)。
+          files: Wren-${{ github.ref_name }}-x64.msi
+          generate_release_notes: true
+          draft: false
+          prerelease: false
