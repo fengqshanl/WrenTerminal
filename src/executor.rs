@@ -13,6 +13,11 @@ use std::process::{Command, Stdio};
 const NOT_FOUND_HINT: &str =
     "（可尝试 `help`；安装 Git for Windows 后可获得 sed/awk/sort/tar 等 GNU 工具）";
 
+/// 去掉 parser 给引号内通配符加的保护标记。
+fn unescape(s: &str) -> String {
+    s.replace(crate::parser::GLOB_ESCAPE, "")
+}
+
 /// 执行一整行（可能包含多条用 ; && || 连接的命令）。
 pub fn execute_line(line: &ParsedLine, ctx: &mut Context) -> Flow {
     for (conn, pipeline) in &line.pipelines {
@@ -62,10 +67,24 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
 
     // 先展开 sudo 前缀：`sudo <命令>` 在当前 shell 内以当前权限执行，
     // 不再像旧实现那样启动一个空的 cmd.exe。
+    // 然后展开通配符（`*.rs`、`src/*` 等），与 bash 一致。
     let mut effective_stages: Vec<Stage> = Vec::with_capacity(pipeline.stages.len());
+    let status = ctx.env.last_status().to_string();
     for stage in &pipeline.stages {
         match rewrite_sudo(stage, ctx) {
-            SudoRewrite::Stage(s) => effective_stages.push(s),
+            SudoRewrite::Stage(mut s) => {
+                // 填入 `$?` 的真实退出码（解析时只放了占位符）。
+                for arg in s.argv.iter_mut() {
+                    if arg.contains(crate::env::STATUS_PLACEHOLDER) {
+                        *arg = arg.replace(crate::env::STATUS_PLACEHOLDER, &status);
+                    }
+                }
+                s.argv = crate::globber::expand_args(&s.argv, &ctx.cwd);
+                s.redirect.input = s.redirect.input.take().map(|f| unescape(&f));
+                s.redirect.output = s.redirect.output.take().map(|f| unescape(&f));
+                s.redirect.stderr = s.redirect.stderr.take().map(|f| unescape(&f));
+                effective_stages.push(s);
+            }
             SudoRewrite::Done(out) => return out,
         }
     }
@@ -74,7 +93,9 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
     let single_external = stages.len() == 1
         && !builtin_active(&stages[0].argv[0], ctx)
         && stages[0].redirect.input.is_none()
-        && stages[0].redirect.output.is_none();
+        && stages[0].redirect.output.is_none()
+        && stages[0].redirect.stderr.is_none()
+        && !stages[0].redirect.merge_stderr;
 
     // 单个外部命令且无重定向：继承终端 stdio，保证交互式程序可用。
     if single_external {
@@ -105,15 +126,47 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
         ctx.interactive = stages.len() == 1
             && stage.redirect.input.is_none()
             && stage.redirect.output.is_none()
+            && stage.redirect.stderr.is_none()
+            && !stage.redirect.merge_stderr
             && std::io::stdin().is_terminal()
             && std::io::stdout().is_terminal();
 
-        let out = if builtin_active(&stage.argv[0], ctx) {
+        let mut out = if builtin_active(&stage.argv[0], ctx) {
             builtins::run(&stage.argv[0], &stage.argv[1..], ctx, stdin_data.as_deref())
                 .unwrap_or_else(|| Output::err(format!("未知内置命令: {}", stage.argv[0])))
         } else {
             run_captured(stage, ctx, stdin_data.as_deref())
         };
+
+        // `2>&1`：把标准错误并入标准输出，随后统一走 stdout 的重定向/管道。
+        if stage.redirect.merge_stderr && !out.stderr.is_empty() {
+            if !out.stdout.is_empty() && !out.stdout.ends_with('\n') {
+                out.stdout.push('\n');
+            }
+            let err = std::mem::take(&mut out.stderr);
+            out.stdout.push_str(&err);
+        }
+
+        // `2>` / `2>>`：标准错误单独写文件。
+        if let Some(errfile) = &stage.redirect.stderr {
+            let path = ctx.resolve(errfile);
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let result = if stage.redirect.stderr_append {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .and_then(|mut f| f.write_all(out.stderr.as_bytes()))
+            } else {
+                fs::write(&path, out.stderr.as_bytes())
+            };
+            if let Err(e) = result {
+                return Output::err(format!("{}: {}", errfile, e));
+            }
+            out.stderr.clear();
+        }
 
         if !out.stderr.is_empty() {
             accumulated_err.push_str(&out.stderr);
@@ -395,6 +448,146 @@ fn prepare_command(stage: &Stage, ctx: &Context) -> (String, Vec<String>, Option
         return (program, args, t.note);
     }
     (program, args, t.note)
+}
+
+/// 执行一整行并捕获标准输出，用于 `$(命令)` 命令替换。
+pub fn capture_line(input: &str, ctx: &mut Context) -> Result<String, String> {
+    let parsed = crate::parser::parse(input, &ctx.env)?;
+    let mut output = String::new();
+    for (conn, pipeline) in &parsed.pipelines {
+        match conn {
+            Conn::And if ctx.env.last_status() != 0 => continue,
+            Conn::Or if ctx.env.last_status() == 0 => continue,
+            _ => {}
+        }
+        let out = run_pipeline(pipeline, ctx);
+        ctx.env.set_last_status(out.code);
+        output.push_str(&out.stdout);
+        if !out.stderr.is_empty() {
+            let mut err = out.stderr.clone();
+            if !err.ends_with('\n') {
+                err.push('\n');
+            }
+            let _ = std::io::stderr().write_all(err.as_bytes());
+        }
+        if out.flow == Flow::Exit {
+            break;
+        }
+    }
+    Ok(output)
+}
+
+/// 展开 `$(命令)` 与反引号命令替换。
+///
+/// 单引号内不展开（与 bash 一致）；算术展开 `$((...))` 原样保留。
+pub fn substitute_commands(input: &str, ctx: &mut Context) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\\' && i + 1 < chars.len() && !in_single {
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if in_single {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+            if let Some(end) = find_closing_paren(&chars, i + 2) {
+                let inner: String = chars[i + 2..end].iter().collect();
+                let raw: String = chars[i..=end].iter().collect();
+                if inner.trim_start().starts_with('(') {
+                    // 算术展开 $((...))，暂不支持，原样保留。
+                    out.push_str(&raw);
+                } else {
+                    out.push_str(&run_substitution(&inner, ctx, &raw));
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+
+        if c == '`' {
+            if let Some(offset) = chars[i + 1..].iter().position(|&ch| ch == '`') {
+                let end = i + 1 + offset;
+                let inner: String = chars[i + 1..end].iter().collect();
+                let raw: String = chars[i..=end].iter().collect();
+                out.push_str(&run_substitution(&inner, ctx, &raw));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn find_closing_paren(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut i = start;
+    let mut single = false;
+    let mut double = false;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' if !single => {
+                i += 2;
+                continue;
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single => depth += 1,
+            ')' if !single => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn run_substitution(command: &str, ctx: &mut Context, fallback: &str) -> String {
+    // 先递归处理嵌套的 $(...) / 反引号，再在“子 shell”里执行：
+    // 克隆上下文，避免 cd / export 影响主 shell（与 bash 的子 shell 行为一致）。
+    let expanded = substitute_commands(command, ctx);
+    let mut sub = ctx.clone();
+    match capture_line(&expanded, &mut sub) {
+        Ok(text) => text
+            .trim_end_matches(['\n', '\r'])
+            .replace(['\n', '\r'], " "),
+        Err(e) => {
+            eprintln!("shell: {}", e);
+            fallback.to_string()
+        }
+    }
 }
 
 /// 有 Git Bash 时，少数内置命令改用 GNU 版本以获得完整参数/正则支持。
@@ -686,5 +879,35 @@ mod tests {
         assert_eq!(args[2], "-v");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_substitution_runs_in_subshell() {
+        use crate::env::Env;
+        let mut ctx = Context::new(Env::new("test".into()));
+        let before = ctx.cwd.clone();
+
+        let expanded = substitute_commands("echo $(echo hi)", &mut ctx);
+        assert_eq!(expanded, "echo hi");
+
+        // 子 shell 里的 cd 不应改变主 shell 的 cwd。
+        let _ = substitute_commands("$(cd /c)", &mut ctx);
+        assert_eq!(ctx.cwd, before);
+    }
+
+    #[test]
+    fn single_quotes_block_substitution() {
+        use crate::env::Env;
+        let mut ctx = Context::new(Env::new("test".into()));
+        let expanded = substitute_commands("echo '$(echo hi)'", &mut ctx);
+        assert_eq!(expanded, "echo '$(echo hi)'");
+    }
+
+    #[test]
+    fn backticks_are_substituted() {
+        use crate::env::Env;
+        let mut ctx = Context::new(Env::new("test".into()));
+        let expanded = substitute_commands("echo `echo hi`", &mut ctx);
+        assert_eq!(expanded, "echo hi");
     }
 }

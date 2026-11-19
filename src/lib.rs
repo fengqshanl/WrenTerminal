@@ -15,6 +15,7 @@ pub mod builtins;
 pub mod completer;
 pub mod env;
 pub mod executor;
+pub mod globber;
 pub mod parser;
 pub mod pathutil;
 pub mod pkg;

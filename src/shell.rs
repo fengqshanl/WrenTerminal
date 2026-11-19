@@ -99,6 +99,7 @@ pub fn run() -> i32 {
                 let _ = rl.add_history_entry(line.as_str());
                 ctx.history.push(line.clone());
 
+                let line = executor::substitute_commands(&line, &mut ctx);
                 let expanded = expand_alias(&line);
                 match parser::parse(&expanded, &ctx.env) {
                     Ok(parsed) => {
@@ -146,6 +147,7 @@ fn run_batch(ctx: &mut Context) -> i32 {
             continue;
         }
         ctx.history.push(line.clone());
+        let line = executor::substitute_commands(&line, ctx);
         let expanded = expand_alias(&line);
         match parser::parse(&expanded, &ctx.env) {
             Ok(parsed) => {

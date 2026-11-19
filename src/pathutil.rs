@@ -12,6 +12,20 @@ fn is_drive_letter(b: u8) -> bool {
     b.is_ascii_alphabetic()
 }
 
+/// Linux 的 `/tmp` 对应的 Windows 目录。
+///
+/// 优先使用 `%LOCALAPPDATA%\Temp`，这样和 Git Bash / MSYS 的 `/tmp` 保持一致；
+/// 取不到时回退到 `std::env::temp_dir()`。
+pub fn linux_tmp_dir() -> PathBuf {
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let p = PathBuf::from(local).join("Temp");
+        if p.is_dir() {
+            return p;
+        }
+    }
+    std::env::temp_dir()
+}
+
 /// 把用户输入的路径（可能是 `/c/foo`、`~/x`、相对路径）解析为 Windows `PathBuf`。
 ///
 /// 规则：
@@ -38,7 +52,28 @@ pub fn to_windows(input: &str, cwd: &Path, home: &Path) -> PathBuf {
 
     let bytes = normalized.as_bytes();
 
-    // POSIX 盘符路径：/c/foo -> C:\foo
+    // Linux 伪文件：/dev/null（以及 /dev/zero）映射到 Windows 的 NUL 设备。
+    let lower = normalized.to_ascii_lowercase();
+    if lower == "/dev/null" || lower == "/dev/zero" {
+        return PathBuf::from("NUL");
+    }
+
+    // /tmp、/var/tmp 映射到 Windows 临时目录。
+    if lower == "/tmp" || lower.starts_with("/tmp/") {
+        let rest = &normalized[4..];
+        let base = linux_tmp_dir();
+        return if rest.is_empty() {
+            base
+        } else {
+            base.join(rest.trim_start_matches('/').replace('/', "\\"))
+        };
+    }
+
+    // POSIX 盘符路径：/c/foo -> C:\foo；单独的 /d -> D:\
+    if bytes.len() == 2 && bytes[0] == b'/' && is_drive_letter(bytes[1]) {
+        let drive = (bytes[1] as char).to_ascii_uppercase();
+        return PathBuf::from(format!("{}:\\", drive));
+    }
     if bytes.len() >= 3 && bytes[0] == b'/' && is_drive_letter(bytes[1]) && bytes[2] == b'/' {
         let drive = (bytes[1] as char).to_ascii_uppercase();
         let rest = &normalized[3..];
@@ -85,8 +120,11 @@ pub fn to_posix(path: &Path) -> String {
     if b.len() >= 2 && is_drive_letter(b[0]) && b[1] == b':' {
         let drive = (b[0] as char).to_ascii_lowercase();
         let tail = &s[2..];
-        if tail.is_empty() {
+        let trimmed = tail.trim_matches('/');
+        if trimmed.is_empty() {
             format!("/{}", drive)
+        } else if tail.starts_with('/') {
+            format!("/{}/{}", drive, trimmed)
         } else {
             format!("/{}{}", drive, tail)
         }

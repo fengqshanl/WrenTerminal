@@ -9,9 +9,33 @@ pub enum Token {
     RedirOut,
     RedirAppend,
     RedirIn,
+    /// `2>` / `2>>`：标准错误重定向。
+    RedirErr,
+    RedirErrAppend,
+    /// `&>` / `&>>`：标准输出和标准错误一起重定向。
+    RedirBoth,
+    RedirBothAppend,
+    /// `2>&1`：把标准错误合并到标准输出。
+    MergeErr,
     AndIf,
     OrIf,
     Semi,
+}
+
+/// 引号内出现的通配符会被加上这个前缀，避免被当成 glob 展开。
+/// 执行阶段会把它去掉。
+pub const GLOB_ESCAPE: char = '\u{1}';
+
+/// 给已转义的字符串里的通配符加保护标记。
+pub fn protect_globs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '[' | ']') {
+            out.push(GLOB_ESCAPE);
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// 多条命令之间的连接方式。
@@ -27,6 +51,11 @@ pub struct Redirect {
     pub input: Option<String>,
     pub output: Option<String>,
     pub append: bool,
+    /// `2>` / `2>>` 的目标文件。
+    pub stderr: Option<String>,
+    pub stderr_append: bool,
+    /// `2>&1`。
+    pub merge_stderr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +97,40 @@ pub fn tokenize(input: &str, env: &Env) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
             }
+            // `2>` / `2>>` / `2>&1`：fd 数字后面紧跟 > 时按错误流处理。
+            '1' | '2' if i + 1 < chars.len() && chars[i + 1] == '>' => {
+                let fd = c;
+                if i + 3 < chars.len() && chars[i + 2] == '&' && chars[i + 3] == '1' {
+                    if fd == '2' {
+                        tokens.push(Token::MergeErr);
+                    }
+                    i += 4;
+                } else if i + 2 < chars.len() && chars[i + 2] == '>' {
+                    tokens.push(if fd == '2' {
+                        Token::RedirErrAppend
+                    } else {
+                        Token::RedirAppend
+                    });
+                    i += 3;
+                } else {
+                    tokens.push(if fd == '2' {
+                        Token::RedirErr
+                    } else {
+                        Token::RedirOut
+                    });
+                    i += 2;
+                }
+            }
+            // `&>` / `&>>`：标准输出和标准错误一起重定向。
+            '&' if i + 1 < chars.len() && chars[i + 1] == '>' => {
+                if i + 2 < chars.len() && chars[i + 2] == '>' {
+                    tokens.push(Token::RedirBothAppend);
+                    i += 3;
+                } else {
+                    tokens.push(Token::RedirBoth);
+                    i += 2;
+                }
+            }
             '>' => {
                 if i + 1 < chars.len() && chars[i + 1] == '>' {
                     tokens.push(Token::RedirAppend);
@@ -104,7 +167,8 @@ pub fn tokenize(input: &str, env: &Env) -> Result<Vec<Token>, String> {
                     return Err("单引号未闭合".into());
                 }
                 i += 1;
-                tokens.push(Token::Word(s));
+                // 单引号内的通配符按字面量处理，不做 glob 展开。
+                tokens.push(Token::Word(protect_globs(&s)));
             }
             '"' => {
                 i += 1;
@@ -125,12 +189,13 @@ pub fn tokenize(input: &str, env: &Env) -> Result<Vec<Token>, String> {
                     return Err("双引号未闭合".into());
                 }
                 i += 1;
-                tokens.push(Token::Word(env.expand(&s)));
+                tokens.push(Token::Word(protect_globs(&env.expand(&s))));
             }
             '\\' => {
                 i += 1;
                 if i < chars.len() {
-                    tokens.push(Token::Word(env.expand(&chars[i].to_string())));
+                    let escaped = chars[i].to_string();
+                    tokens.push(Token::Word(protect_globs(&env.expand(&escaped))));
                     i += 1;
                 } else {
                     return Err("转义符 '\\' 后缺少字符".into());
@@ -182,7 +247,11 @@ pub fn parse(input: &str, env: &Env) -> Result<ParsedLine, String> {
     let mut expect_word: Option<&str> = None;
 
     let flush_stage = |stages: &mut Vec<Stage>, argv: &mut Vec<String>, redirect: &mut Redirect| -> Result<(), String> {
-        if argv.is_empty() && redirect.input.is_none() && redirect.output.is_none() {
+        let has_redirect = redirect.input.is_some()
+            || redirect.output.is_some()
+            || redirect.stderr.is_some()
+            || redirect.merge_stderr;
+        if argv.is_empty() && !has_redirect {
             return Ok(());
         }
         if argv.is_empty() {
@@ -199,14 +268,28 @@ pub fn parse(input: &str, env: &Env) -> Result<ParsedLine, String> {
         if let Some(kind) = expect_word.take() {
             match tok {
                 Token::Word(w) => {
-                    if kind == "input" {
-                        redirect.input = Some(w.clone());
-                    } else {
-                        redirect.output = Some(w.clone());
+                    match kind {
+                        "input" => redirect.input = Some(w.clone()),
+                        "stderr" => redirect.stderr = Some(w.clone()),
+                        "both" => {
+                            redirect.output = Some(w.clone());
+                            redirect.stderr = Some(w.clone());
+                        }
+                        _ => redirect.output = Some(w.clone()),
                     }
                     continue;
                 }
-                _ => return Err(format!("{} 后面需要一个文件名", if kind == "input" { "<" } else { ">" })),
+                _ => {
+                    return Err(format!(
+                        "{} 后面需要一个文件名",
+                        match kind {
+                            "input" => "<",
+                            "stderr" => "2>",
+                            "both" => "&>",
+                            _ => ">",
+                        }
+                    ))
+                }
             }
         }
 
@@ -217,6 +300,17 @@ pub fn parse(input: &str, env: &Env) -> Result<ParsedLine, String> {
                 redirect.append = matches!(tok, Token::RedirAppend);
                 expect_word = Some("output");
             }
+            Token::RedirErr | Token::RedirErrAppend => {
+                redirect.stderr_append = matches!(tok, Token::RedirErrAppend);
+                expect_word = Some("stderr");
+            }
+            Token::RedirBoth | Token::RedirBothAppend => {
+                let append = matches!(tok, Token::RedirBothAppend);
+                redirect.append = append;
+                redirect.stderr_append = append;
+                expect_word = Some("both");
+            }
+            Token::MergeErr => redirect.merge_stderr = true,
             Token::Pipe => {
                 flush_stage(&mut stages, &mut argv, &mut redirect)?;
                 if stages.is_empty() {
@@ -289,5 +383,34 @@ mod tests {
         assert_eq!(line.pipelines[1].0, Conn::And);
         assert_eq!(line.pipelines[2].0, Conn::Always);
         assert_eq!(line.pipelines[3].0, Conn::Or);
+    }
+
+    #[test]
+    fn stderr_redirection() {
+        let line = parse("cmd 2> err.log", &test_env()).unwrap();
+        let r = &line.pipelines[0].1.stages[0].redirect;
+        assert_eq!(r.stderr.as_deref(), Some("err.log"));
+        assert!(!r.stderr_append);
+        assert!(r.output.is_none());
+
+        let line = parse("cmd 2>> err.log", &test_env()).unwrap();
+        let r = &line.pipelines[0].1.stages[0].redirect;
+        assert!(r.stderr_append);
+
+        let line = parse("cmd 2>&1", &test_env()).unwrap();
+        assert!(line.pipelines[0].1.stages[0].redirect.merge_stderr);
+
+        let line = parse("cmd &> all.log", &test_env()).unwrap();
+        let r = &line.pipelines[0].1.stages[0].redirect;
+        assert_eq!(r.output.as_deref(), Some("all.log"));
+        assert_eq!(r.stderr.as_deref(), Some("all.log"));
+    }
+
+    #[test]
+    fn quoted_globs_are_protected() {
+        let line = parse(r#"ls "*.rs" *.toml"#, &test_env()).unwrap();
+        let argv = &line.pipelines[0].1.stages[0].argv;
+        assert!(argv[1].contains(GLOB_ESCAPE));
+        assert!(!argv[2].contains(GLOB_ESCAPE));
     }
 }

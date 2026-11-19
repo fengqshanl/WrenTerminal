@@ -55,11 +55,17 @@ fn to_ascii_name(name: &str) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// `$?` 在解析阶段先替换成这个占位符，等真正执行该条管道时再填入退出码。
+///
+/// 这样 `cmd; echo $?` 能拿到 `cmd` 的退出码，而不是整行解析前的旧值。
+pub const STATUS_PLACEHOLDER: char = '\u{2}';
+
 /// 环境变量集合。
 ///
 /// - 内部以 Linux 习惯保存（例如 PATH 用 `:` 分隔，含 HOME/USER）。
 /// - 启动或 `export` 时会同步到底层进程环境，保证子进程可见。
 /// - `spawn_env()` 返回适合 Windows 子进程使用的环境快照（PATH 转回 `;`）。
+#[derive(Clone)]
 pub struct Env {
     vars: HashMap<String, String>,
     last_status: Cell<i32>,
@@ -192,7 +198,8 @@ impl Env {
             if chars[i] == '$' && i + 1 < chars.len() {
                 match chars[i + 1] {
                     '?' => {
-                        out.push_str(&self.last_status().to_string());
+                        // 延迟到执行阶段再取值，见 STATUS_PLACEHOLDER。
+                        out.push(STATUS_PLACEHOLDER);
                         i += 2;
                         continue;
                     }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 命令执行所需的上下文。
+#[derive(Clone)]
 pub struct Context {
     pub env: Env,
     pub cwd: PathBuf,
@@ -341,22 +342,31 @@ fn cmd_ls(args: &[String], name: &str, ctx: &Context) -> Output {
     if paths.is_empty() { paths.push(".".into()); }
 
     let mut result = String::new();
-    let multi = paths.len() > 1;
+    let mut errors = String::new();
+    // 与 GNU ls 一致：多个参数里只要包含目录，才为每个参数打印 "路径:" 头。
+    let show_headers = paths.len() > 1
+        && paths
+            .iter()
+            .any(|p| fs::metadata(ctx.resolve(p)).map(|m| m.is_dir()).unwrap_or(false));
     for (idx, p) in paths.iter().enumerate() {
         let dir = ctx.resolve(p);
         let meta = match fs::metadata(&dir) {
             Ok(m) => m,
             Err(e) => {
-                result.push_str(&format!("ls: 无法访问 '{}': {}\n", p, e));
+                errors.push_str(&format!("ls: 无法访问 '{}': {}\n", p, e));
                 continue;
             }
         };
-        if multi {
+        if show_headers {
             if idx > 0 && !result.ends_with('\n') { result.push('\n'); }
             result.push_str(&format!("{}:\n", p));
         }
         if meta.is_file() {
-            result.push_str(&format_entry(&dir, long, human, ctx.color));
+            if long {
+                result.push_str(&format_entry(&dir, true, human, ctx.color));
+                result.push(' ');
+            }
+            result.push_str(&color_name(p, &dir, ".", ctx.color));
             result.push('\n');
             continue;
         }
@@ -364,7 +374,7 @@ fn cmd_ls(args: &[String], name: &str, ctx: &Context) -> Output {
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) => {
-                result.push_str(&format!("ls: 无法打开 '{}': {}\n", p, e));
+                errors.push_str(&format!("ls: 无法打开 '{}': {}\n", p, e));
                 continue;
             }
         };
@@ -406,7 +416,12 @@ fn cmd_ls(args: &[String], name: &str, ctx: &Context) -> Output {
             }
         }
     }
-    Output::ok(result)
+    let mut out = Output::ok(result);
+    if !errors.is_empty() {
+        out.stderr = errors;
+        out.code = 2; // GNU ls 用 2 表示“无法访问某个参数”
+    }
+    out
 }
 
 fn color_name(name: &str, path: &Path, _dot: &str, color: bool) -> String {

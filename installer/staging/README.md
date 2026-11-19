@@ -52,7 +52,7 @@ echo "ls -la" | .\target\release\wren.exe --batch
  \ \_/ / | |_) | |_____| | | \ |
   \___/  |____/          |_|  \_
 
- Wren v0.2.1  — A lightweight Linux-style shell on Windows (no WSL)
+ Wren v0.2.2  — A lightweight Linux-style shell on Windows (no WSL)
  欢迎, zhangzhe ! 输入 help 查看可用命令，exit 退出。
  提示: 支持管道 | · 重定向 > >> < · 变量 $VAR · 历史 ↑/↓ · 补全 Tab
 
@@ -83,10 +83,14 @@ zhangzhe@ZHE:~$
 - 提示符传**纯文本**给行编辑器、颜色由高亮回调添加；用户名显示为 ASCII 拼音（真实中文用户名仍保留给 `whoami`），彻底避免 Windows 控制台宽字符导致的光标定位偏移
 
 ### 2. 命令解析
-- 管道 `|`、重定向 `>` `>>` `<`
+- 管道 `|`、输入重定向 `<`
+- 输出重定向 `>` `>>`，错误重定向 `2>` `2>>` `2>&1`，合并重定向 `&>` `&>>`
 - 连接符 `&&`、`||`、`;`
+- 通配符展开 `*` `?` `[a-z]`（未加引号时，与 bash 一致；引号内的通配符按字面量处理）
+- 命令替换 `$(命令)` 与反引号 `` `命令` ``，在子 shell 中执行，`cd` 不会影响主 shell
 - 单引号 / 双引号、反斜杠转义
-- 变量展开 `$VAR`、`${VAR}`、`$?`（上一条退出码）、`$$`（PID）、`~`
+- 变量展开 `$VAR`、`${VAR}`、`$?`（上一条命令的退出码）、`$$`（PID）、`~`
+- `/tmp` 映射到 Windows 临时目录，`/dev/null` 映射到 `NUL`
 
 ### 3. 内置命令（Rust 原生实现）
 `help` `exit` `clear` `pwd` `cd` `ls` `echo` `cat` `head` `tail` `wc` `grep` `find`
@@ -229,6 +233,7 @@ src/
 ├── lib.rs           # 模块声明
 ├── shell.rs         # REPL 主循环、提示符、启动界面、批处理模式、Windows 控制台初始化
 ├── parser.rs        # 分词、引号、变量展开、管道/重定向/连接符解析
+├── globber.rs       # shell 风格通配符展开（* ? [a-z]，含隐藏文件规则）
 ├── builtins.rs      # 内置命令实现 + 上下文(Env/cwd/history) + 输出类型
 ├── pkg.rs           # apt 风格包管理前端（winget / choco / scoop）
 ├── update.rs        # 启动更新检查、update 命令、MSI 下载与安装
