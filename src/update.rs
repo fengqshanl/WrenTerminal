@@ -227,55 +227,105 @@ fn help_text() -> String {
 // ---------------------------------------------------------------------------
 
 fn download_msi(info: &UpdateInfo, path_var: &str, interactive: bool) -> Result<PathBuf, String> {
-    let curl = find_program(path_var, "curl")
-        .ok_or_else(|| "未找到 curl.exe（Windows 10 1803+ 自带）".to_string())?;
     let url = if info.url.is_empty() {
         fallback_asset_url(&format!("v{}", info.version))
     } else {
         info.url.clone()
     };
     let file = std::env::temp_dir().join(format!("Wren-{}-x64.msi", info.version));
-    let _ = fs::remove_file(&file);
 
-    let mut cmd = Command::new(curl);
-    cmd.args([
-        "-L",
-        "--fail",
-        "--retry",
-        "2",
-        "--connect-timeout",
-        "10",
-        "--max-time",
-        "600",
-        "-o",
-    ])
-    .arg(&file)
-    .arg(&url)
-    .stdin(Stdio::null());
-    if interactive {
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    } else {
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    }
-
-    let out = cmd.output().map_err(|e| format!("无法启动 curl: {}", e))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let mut errors = Vec::new();
+    if let Some(curl) = find_program(path_var, "curl") {
         let _ = fs::remove_file(&file);
-        return Err(format!(
-            "下载安装包失败{}",
-            if err.is_empty() {
-                String::new()
-            } else {
-                format!("：{}", err)
+        let mut cmd = Command::new(curl);
+        cmd.args([
+            "-L",
+            "--fail",
+            "--retry",
+            "3",
+            "--retry-all-errors",
+            "--retry-delay",
+            "1",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "600",
+            // Windows schannel 在部分网络环境下会因吊销检查失败而中断连接。
+            "--ssl-no-revoke",
+        ]);
+        // 交互模式下显示进度条，其余场景只输出错误。
+        cmd.arg(if interactive { "--progress-bar" } else { "-sS" });
+        cmd.arg("-o").arg(&file).arg(&url).stdin(Stdio::null());
+        if interactive {
+            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        } else {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        match cmd.output() {
+            Ok(out) => {
+                // schannel 有时在收尾阶段报 “missing close_notify”，但文件其实完整，
+                // 因此以文件校验结果为准，而不是只看退出码。
+                if validate_msi(&file).is_ok() {
+                    return Ok(file);
+                }
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                errors.push(if err.is_empty() {
+                    format!("curl 退出码 {}", out.status.code().unwrap_or(-1))
+                } else {
+                    err
+                });
             }
-        ));
+            Err(e) => errors.push(format!("无法启动 curl: {}", e)),
+        }
+    } else {
+        errors.push("未找到 curl.exe（Windows 10 1803+ 自带）".into());
     }
-    if let Err(e) = validate_msi(&file) {
+
+    // 兜底：用 PowerShell 的 Invoke-WebRequest 再试一次。
+    if let Some(powershell) = find_program(path_var, "powershell") {
         let _ = fs::remove_file(&file);
-        return Err(e);
+        let script = format!(
+            "$ProgressPreference = 'SilentlyContinue'; \
+             Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing -TimeoutSec 300",
+            ps_quote(&url),
+            ps_quote(&file.to_string_lossy())
+        );
+        match Command::new(powershell)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                if validate_msi(&file).is_ok() {
+                    return Ok(file);
+                }
+                errors.push("PowerShell 下载的文件不是有效安装包".into());
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                errors.push(if err.is_empty() {
+                    format!("PowerShell 退出码 {}", out.status.code().unwrap_or(-1))
+                } else {
+                    err
+                });
+            }
+            Err(e) => errors.push(format!("无法启动 PowerShell: {}", e)),
+        }
     }
-    Ok(file)
+
+    let _ = fs::remove_file(&file);
+    Err(format!(
+        "下载安装包失败：{}\n也可以手动下载：{}",
+        errors.join("；"),
+        url
+    ))
 }
 
 /// 检查文件确实是 MSI（OLE 复合文档）。
@@ -391,6 +441,7 @@ fn fetch_latest(current: &str, path_var: &str) -> Result<UpdateInfo, String> {
             "-L",
             "--max-time",
             "8",
+            "--ssl-no-revoke",
             "-H",
             &format!("User-Agent: {}", user_agent),
             "-H",

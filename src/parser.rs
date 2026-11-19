@@ -156,80 +156,134 @@ pub fn tokenize(input: &str, env: &Env) -> Result<Vec<Token>, String> {
                     return Err("不支持后台任务 '&'（末尾单 &）".into());
                 }
             }
+            '\'' | '"' | '\\' | _ => {
+                // 普通词：支持引号拼接（`a'b c'`、`"x"y`）与内联变量展开。
+                let (word, next) = scan_word(&chars, i, env)?;
+                tokens.push(Token::Word(word));
+                i = next;
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+/// 扫描一个“词”，直到遇到未加引号的空白或控制符。
+///
+/// 与 bash 一致：
+/// - 单引号内不做变量展开和 glob
+/// - 双引号内做变量展开，但不做 glob
+/// - 引号可以与普通字符拼接成一个词
+fn scan_word(chars: &[char], mut i: usize, env: &Env) -> Result<(String, usize), String> {
+    let mut s = String::new();
+    // 记录 ~ 是否位于词首，用于主目录展开。
+    let at_start = true;
+    let mut first = true;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch.is_whitespace() || matches!(ch, '|' | '>' | '<' | ';' | '&') {
+            break;
+        }
+        match ch {
+            '\\' => {
+                if i + 1 < chars.len() {
+                    s.push(GLOB_ESCAPE);
+                    s.push(chars[i + 1]);
+                    i += 2;
+                } else {
+                    s.push('\\');
+                    i += 1;
+                }
+            }
             '\'' => {
                 i += 1;
-                let mut s = String::new();
+                let mut part = String::new();
                 while i < chars.len() && chars[i] != '\'' {
-                    s.push(chars[i]);
+                    part.push(chars[i]);
                     i += 1;
                 }
                 if i >= chars.len() {
                     return Err("单引号未闭合".into());
                 }
                 i += 1;
-                // 单引号内的通配符按字面量处理，不做 glob 展开。
-                tokens.push(Token::Word(protect_globs(&s)));
+                s.push_str(&protect_globs(&part));
             }
             '"' => {
                 i += 1;
-                let mut s = String::new();
+                let mut part = String::new();
                 while i < chars.len() && chars[i] != '"' {
                     if chars[i] == '\\' && i + 1 < chars.len() {
                         let n = chars[i + 1];
                         if matches!(n, '"' | '\\' | '$' | '`') {
-                            s.push(n);
+                            part.push(n);
                             i += 2;
                             continue;
                         }
                     }
-                    s.push(chars[i]);
+                    part.push(chars[i]);
                     i += 1;
                 }
                 if i >= chars.len() {
                     return Err("双引号未闭合".into());
                 }
                 i += 1;
-                tokens.push(Token::Word(protect_globs(&env.expand(&s))));
+                s.push_str(&protect_globs(&env.expand(&part)));
             }
-            '\\' => {
-                i += 1;
-                if i < chars.len() {
-                    let escaped = chars[i].to_string();
-                    tokens.push(Token::Word(protect_globs(&env.expand(&escaped))));
+            '$' => {
+                let (text, next) = scan_dollar(chars, i, env);
+                s.push_str(&text);
+                i = next;
+            }
+            '~' if first && at_start => {
+                // 词首的 ~ 展开为主目录（~ 后必须跟 / 或结束）。
+                let next_is_sep = i + 1 >= chars.len()
+                    || chars[i + 1] == '/'
+                    || chars[i + 1].is_whitespace()
+                    || matches!(chars[i + 1], '|' | '>' | '<' | ';' | '&');
+                if next_is_sep {
+                    s.push_str(&env.home_string());
                     i += 1;
                 } else {
-                    return Err("转义符 '\\' 后缺少字符".into());
-                }
-            }
-            _ => {
-                let mut s = String::new();
-                while i < chars.len() {
-                    let ch = chars[i];
-                    if ch == '\\' {
-                        if i + 1 < chars.len() {
-                            s.push(chars[i + 1]);
-                            i += 2;
-                            continue;
-                        }
-                        s.push('\\');
-                        i += 1;
-                        continue;
-                    }
-                    if ch.is_whitespace()
-                        || matches!(ch, '|' | '>' | '<' | ';' | '&' | '\'' | '"')
-                    {
-                        break;
-                    }
                     s.push(ch);
                     i += 1;
                 }
-                if !s.is_empty() {
-                    tokens.push(Token::Word(env.expand(&s)));
-                }
+            }
+            _ => {
+                s.push(ch);
+                i += 1;
             }
         }
+        first = false;
     }
-    Ok(tokens)
+    Ok((s, i))
+}
+
+/// 展开 `$NAME`、`${NAME}`、`$?`、`$$`，返回 (文本, 新位置)。
+fn scan_dollar(chars: &[char], i: usize, env: &Env) -> (String, usize) {
+    if i + 1 >= chars.len() {
+        return ("$".to_string(), i + 1);
+    }
+    match chars[i + 1] {
+        '?' => ("\u{2}".to_string(), i + 2),
+        '$' => (std::process::id().to_string(), i + 2),
+        '{' => {
+            if let Some(end) = chars[i + 2..].iter().position(|&c| c == '}') {
+                let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                (env.get_or(&name, ""), i + 2 + end + 1)
+            } else {
+                ("$".to_string(), i + 1)
+            }
+        }
+        c if c.is_ascii_alphabetic() || c == '_' => {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            let name: String = chars[i + 1..j].iter().collect();
+            (env.get_or(&name, ""), j)
+        }
+        _ => ("$".to_string(), i + 1),
+    }
 }
 
 /// 把 token 序列解析为可执行的命令列表。
@@ -412,5 +466,27 @@ mod tests {
         let argv = &line.pipelines[0].1.stages[0].argv;
         assert!(argv[1].contains(GLOB_ESCAPE));
         assert!(!argv[2].contains(GLOB_ESCAPE));
+    }
+
+    #[test]
+    fn quotes_concatenate_into_one_word() {
+        let line = parse(r#"alias ll='ls -l'"#, &test_env()).unwrap();
+        let argv = &line.pipelines[0].1.stages[0].argv;
+        assert_eq!(argv, &["alias", "ll=ls -l"]);
+
+        let line = parse(r#"echo a"b c"d"#, &test_env()).unwrap();
+        assert_eq!(line.pipelines[0].1.stages[0].argv[1], "ab cd");
+
+        let line = parse(r#"export FOO="a b""#, &test_env()).unwrap();
+        assert_eq!(line.pipelines[0].1.stages[0].argv[1], "FOO=a b");
+    }
+
+    #[test]
+    fn tilde_and_variables_inside_words() {
+        let line = parse("echo ~/x $FOO pre$FOO", &test_env()).unwrap();
+        let argv = &line.pipelines[0].1.stages[0].argv;
+        assert!(argv[1].ends_with("/x"));
+        assert_eq!(argv[2], "bar");
+        assert_eq!(argv[3], "prebar");
     }
 }

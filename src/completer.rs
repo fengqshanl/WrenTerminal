@@ -19,6 +19,8 @@ use std::sync::{Arc, RwLock};
 pub struct ShellHelper {
     pub cwd: Arc<RwLock<PathBuf>>,
     env_names: Vec<String>,
+    /// PATH 中可执行文件的命令名（启动时扫描一次）。
+    path_commands: Vec<String>,
 }
 
 impl ShellHelper {
@@ -26,7 +28,12 @@ impl ShellHelper {
         let mut env_names: Vec<String> = env.all().into_iter().map(|(k, _)| k).collect();
         env_names.sort();
         env_names.dedup();
-        Self { cwd, env_names }
+        let path_commands = scan_path_commands(&env.get_or("PATH", ""));
+        Self {
+            cwd,
+            env_names,
+            path_commands,
+        }
     }
 
     /// 所有可补全的命令名。
@@ -34,6 +41,7 @@ impl ShellHelper {
         let mut names: Vec<String> = builtins::BUILTINS.iter().map(|b| b.name.to_string()).collect();
         names.extend(["quit", "cls", "ll", "la", "printenv", "egrep", "fgrep"].iter().map(|s| s.to_string()));
         names.extend(translator::known_commands());
+        names.extend(self.path_commands.iter().cloned());
         names.sort();
         names.dedup();
         names
@@ -77,6 +85,36 @@ impl ShellHelper {
         out.sort();
         out
     }
+}
+
+/// 扫描 PATH，收集可执行文件名（不含扩展名）。
+fn scan_path_commands(path_var: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in crate::winutil::split_path(path_var) {
+        let dir = dir.trim().trim_matches('"');
+        if dir.is_empty() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let lower = fname.to_ascii_lowercase();
+            for ext in [".exe", ".cmd", ".bat", ".com"] {
+                if lower.ends_with(ext) {
+                    let stem = &fname[..fname.len() - ext.len()];
+                    if !stem.is_empty() {
+                        names.push(stem.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 impl Completer for ShellHelper {

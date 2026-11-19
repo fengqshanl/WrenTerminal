@@ -19,6 +19,8 @@ pub struct Context {
     pub interactive: bool,
     /// 是否已经提示过 Windows 下 sudo 的语义（每个会话只提示一次）。
     pub sudo_hint_shown: bool,
+    /// 用户别名（`alias ll='ls -l'`），持久化到 `~/.wren_aliases`。
+    pub aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Context {
@@ -31,6 +33,38 @@ impl Context {
             color: true,
             interactive: true,
             sudo_hint_shown: false,
+            aliases: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// 把别名保存到 `~/.wren_aliases`，下次启动自动加载。
+    pub fn save_aliases(&self) {
+        let path = self.home().join(".wren_aliases");
+        let mut text = String::new();
+        for (name, value) in &self.aliases {
+            text.push_str(&format!("alias {}='{}'\n", name, value.replace('\'', "'\\''")));
+        }
+        let _ = fs::write(path, text);
+    }
+
+    /// 从 `~/.wren_aliases` 读取别名。
+    pub fn load_aliases(&mut self) {
+        let path = self.home().join(".wren_aliases");
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("alias ") else {
+                continue;
+            };
+            if let Some((name, value)) = rest.split_once('=') {
+                let value = value.trim().trim_matches('\'').trim_matches('"');
+                let name = name.trim();
+                if !name.is_empty() {
+                    self.aliases.insert(name.to_string(), value.to_string());
+                }
+            }
         }
     }
 
@@ -156,6 +190,8 @@ pub static BUILTINS: &[BuiltinInfo] = &[
     BuiltinInfo { name: "nproc", usage: "nproc", desc: "显示可用 CPU 核心数" },
     BuiltinInfo { name: "free", usage: "free [-h]", desc: "显示内存使用情况" },
     BuiltinInfo { name: "uptime", usage: "uptime [-p]", desc: "显示系统运行时间" },
+    BuiltinInfo { name: "alias", usage: "alias [名称='命令']", desc: "查看或设置别名（保存到 ~/.wren_aliases）" },
+    BuiltinInfo { name: "unalias", usage: "unalias 名称...", desc: "删除别名（-a 删除全部）" },
 ];
 
 /// 判断命令是否为内置命令。
@@ -167,7 +203,7 @@ pub fn is_builtin(name: &str) -> bool {
         "rm" | "cp" | "mv" | "touch" | "export" | "unset" | "env" | "printenv" |
         "which" | "history" | "uname" | "whoami" | "hostname" | "date" | "seq" |
         "true" | "false" | "type" | "tree" | "sleep" | "apt" | "apt-get" | "update"
-        | "man" | "nproc" | "free" | "uptime"
+        | "man" | "nproc" | "free" | "uptime" | "alias" | "unalias"
     )
 }
 
@@ -222,6 +258,8 @@ pub fn run(name: &str, args: &[String], ctx: &mut Context, stdin: Option<&str>) 
         "nproc" => cmd_nproc(),
         "free" => cmd_free(args),
         "uptime" => cmd_uptime(args),
+        "alias" => cmd_alias(args, ctx),
+        "unalias" => cmd_unalias(args, ctx),
         _ => return None,
     };
     Some(out)
@@ -269,7 +307,7 @@ fn cmd_cd(args: &[String], ctx: &mut Context) -> Output {
     } else {
         args[0].clone()
     };
-    let path = ctx.resolve(&target);
+    let path = pathutil::normalize_lexical(&ctx.resolve(&target));
     match fs::metadata(&path) {
         Ok(m) if m.is_dir() => {
             let old = ctx.cwd.to_string_lossy().to_string();
@@ -1150,6 +1188,63 @@ fn cmd_uptime(args: &[String]) -> Output {
         cmd_date(),
         up
     ))
+}
+
+fn cmd_alias(args: &[String], ctx: &mut Context) -> Output {
+    if args.is_empty() {
+        if ctx.aliases.is_empty() {
+            return Output::ok("");
+        }
+        let mut out = String::new();
+        for (name, value) in &ctx.aliases {
+            out.push_str(&format!("alias {}='{}'\n", name, value));
+        }
+        return Output::ok(out);
+    }
+
+    let mut changed = false;
+    for arg in args {
+        match arg.split_once('=') {
+            Some((name, value)) if !name.trim().is_empty() => {
+                let name = name.trim().to_string();
+                // 引号保护标记不应写入别名，展开时按普通文本重新解析。
+                let value = value.replace(crate::parser::GLOB_ESCAPE, "");
+                ctx.aliases.insert(name, value);
+                changed = true;
+            }
+            _ => {
+                // `alias name`：显示单个别名
+                match ctx.aliases.get(arg.trim()) {
+                    Some(v) => return Output::ok(format!("alias {}='{}'\n", arg.trim(), v)),
+                    None => {
+                        return Output::err(format!("alias: {}: 未找到", arg.trim()));
+                    }
+                }
+            }
+        }
+    }
+    if changed {
+        ctx.save_aliases();
+    }
+    Output::ok("")
+}
+
+fn cmd_unalias(args: &[String], ctx: &mut Context) -> Output {
+    if args.is_empty() {
+        return Output::err("unalias: 用法: unalias <名称>... | unalias -a");
+    }
+    if args.iter().any(|a| a == "-a") {
+        ctx.aliases.clear();
+        ctx.save_aliases();
+        return Output::ok("");
+    }
+    for name in args {
+        if ctx.aliases.remove(name.trim()).is_none() {
+            return Output::err(format!("unalias: {}: 未找到", name.trim()));
+        }
+    }
+    ctx.save_aliases();
+    Output::ok("")
 }
 
 fn cmd_seq(args: &[String]) -> Output {

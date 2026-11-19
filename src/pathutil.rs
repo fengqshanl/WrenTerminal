@@ -102,6 +102,43 @@ pub fn to_windows(input: &str, cwd: &Path, home: &Path) -> PathBuf {
     }
 }
 
+/// 词法归一化路径：消掉 `.`、多余的 `/`，并把 `..` 折叠掉。
+///
+/// 与 bash 的 `cd` 行为一致（不做符号链接解析）。
+/// 例如 `D:\code\app\..\..` -> `D:\`，`D:\code\app\.\src` -> `D:\code\app\src`。
+pub fn normalize_lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut parts: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // 已经到达根目录时，`..` 不再向上。
+                let at_root = matches!(parts.last(), Some(Component::RootDir))
+                    || matches!(parts.last(), Some(Component::Prefix(_)));
+                let can_pop = matches!(parts.last(), Some(Component::Normal(_)));
+                if can_pop {
+                    parts.pop();
+                } else if !at_root {
+                    parts.push(comp);
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+
+    let mut out = PathBuf::new();
+    for part in parts {
+        out.push(part.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
 /// 取当前工作目录所在盘符（大写字母），取不到时回退到 `C`。
 fn current_drive(cwd: &Path) -> char {
     let s = cwd.to_string_lossy();
@@ -190,5 +227,23 @@ mod tests {
         let home = PathBuf::from(r"C:\Users\me");
         assert_eq!(to_windows("~", &cwd, &home), home);
         assert_eq!(to_windows("~/proj", &cwd, &home), PathBuf::from(r"C:\Users\me\proj"));
+    }
+
+    #[test]
+    fn lexical_normalization() {
+        assert_eq!(
+            normalize_lexical(Path::new(r"D:\code\app\..\..")),
+            PathBuf::from(r"D:\")
+        );
+        assert_eq!(
+            normalize_lexical(Path::new(r"D:\code\app\.\src")),
+            PathBuf::from(r"D:\code\app\src")
+        );
+        assert_eq!(
+            normalize_lexical(Path::new(r"D:\code\app\..")),
+            PathBuf::from(r"D:\code")
+        );
+        // 根目录上的 `..` 不再向上。
+        assert_eq!(normalize_lexical(Path::new(r"D:\..")), PathBuf::from(r"D:\"));
     }
 }

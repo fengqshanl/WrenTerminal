@@ -52,7 +52,7 @@ echo "ls -la" | .\target\release\wren.exe --batch
  \ \_/ / | |_) | |_____| | | \ |
   \___/  |____/          |_|  \_
 
- Wren v0.2.2  — A lightweight Linux-style shell on Windows (no WSL)
+ Wren v0.2.3  — A lightweight Linux-style shell on Windows (no WSL)
  欢迎, zhangzhe ! 输入 help 查看可用命令，exit 退出。
  提示: 支持管道 | · 重定向 > >> < · 变量 $VAR · 历史 ↑/↓ · 补全 Tab
 
@@ -77,7 +77,7 @@ zhangzhe@ZHE:~$
 
 ### 1. Linux 风格交互界面
 - 彩色提示符 `user@host:~/path$`（root 显示 `#`）
-- 上下方向键翻阅历史、Tab 命令/文件/变量补全
+- 上下方向键翻阅历史、Tab 命令/文件/变量补全（命令补全包含 PATH 中的可执行文件）
 - 启动横幅、Ctrl-C/Ctrl-D 处理
 - 历史持久化到 `~/.wren_history`
 - 提示符传**纯文本**给行编辑器、颜色由高亮回调添加；用户名显示为 ASCII 拼音（真实中文用户名仍保留给 `whoami`），彻底避免 Windows 控制台宽字符导致的光标定位偏移
@@ -88,7 +88,7 @@ zhangzhe@ZHE:~$
 - 连接符 `&&`、`||`、`;`
 - 通配符展开 `*` `?` `[a-z]`（未加引号时，与 bash 一致；引号内的通配符按字面量处理）
 - 命令替换 `$(命令)` 与反引号 `` `命令` ``，在子 shell 中执行，`cd` 不会影响主 shell
-- 单引号 / 双引号、反斜杠转义
+- 单引号 / 双引号、反斜杠转义，支持引号拼接（`a"b c"d` → `ab cd`）
 - 变量展开 `$VAR`、`${VAR}`、`$?`（上一条命令的退出码）、`$$`（PID）、`~`
 - `/tmp` 映射到 Windows 临时目录，`/dev/null` 映射到 `NUL`
 
@@ -96,9 +96,20 @@ zhangzhe@ZHE:~$
 `help` `exit` `clear` `pwd` `cd` `ls` `echo` `cat` `head` `tail` `wc` `grep` `find`
 `mkdir` `rmdir` `rm` `cp` `mv` `touch` `export` `unset` `env` `which` `history`
 `uname` `whoami` `hostname` `date` `seq` `true` `false` `type` `tree` `sleep`
-`apt` `apt-get` `update` `man` `nproc` `free` `uptime`
+`apt` `apt-get` `update` `man` `nproc` `free` `uptime` `alias` `unalias`
 
 别名：`ll` → `ls -l`，`la` → `ls -a`，`..` → `cd ..`，`...` → `cd ../..`，`cls` → `clear`
+
+自定义别名会保存到 `~/.wren_aliases`，下次启动自动加载：
+
+```bash
+alias gs='git status'
+alias ll='ls -l'
+unalias gs
+alias                # 列出所有别名
+```
+
+`cd` 会像 bash 一样做词法归一化，`cd ../..` 后提示符显示 `/d/code` 而不是 `/d/code/app/../..`。
 
 ### 4. apt 风格软件包管理
 

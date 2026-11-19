@@ -26,6 +26,7 @@ pub fn run() -> i32 {
         .unwrap_or_else(|| "Wren".into());
     let env = Env::new(exe);
     let mut ctx = Context::new(env);
+    ctx.load_aliases();
 
     // 默认始终进入交互模式（保证双击 / Start-Process 启动都能看到提示符）。
     // 只有显式传入 --batch / -b 时才走批处理模式（管道或脚本重定向）。
@@ -100,7 +101,7 @@ pub fn run() -> i32 {
                 ctx.history.push(line.clone());
 
                 let line = executor::substitute_commands(&line, &mut ctx);
-                let expanded = expand_alias(&line);
+                let expanded = expand_alias(&line, &ctx);
                 match parser::parse(&expanded, &ctx.env) {
                     Ok(parsed) => {
                         if parsed.pipelines.is_empty() { continue; }
@@ -148,7 +149,7 @@ fn run_batch(ctx: &mut Context) -> i32 {
         }
         ctx.history.push(line.clone());
         let line = executor::substitute_commands(&line, ctx);
-        let expanded = expand_alias(&line);
+        let expanded = expand_alias(&line, &ctx);
         match parser::parse(&expanded, &ctx.env) {
             Ok(parsed) => {
                 if parsed.pipelines.is_empty() {
@@ -178,24 +179,50 @@ fn build_prompt(ctx: &Context) -> String {
 }
 
 /// 常见别名（仅在行首展开）。
-fn expand_alias(line: &str) -> String {
-    let aliases: &[(&str, &str)] = &[
+fn expand_alias(line: &str, ctx: &Context) -> String {
+    let builtin_aliases: &[(&str, &str)] = &[
         ("ll", "ls -l"),
         ("la", "ls -a"),
         ("..", "cd .."),
         ("...", "cd ../.."),
     ];
-    let trimmed = line.trim_start();
-    let leading = &line[..line.len() - trimmed.len()];
-    for (alias, expansion) in aliases {
-        if trimmed == *alias {
-            return format!("{}{}", leading, expansion);
+
+    let mut current = line.to_string();
+    // 允许别名指向别名，但限制层数避免循环。
+    for _ in 0..8 {
+        let trimmed = current.trim_start();
+        let leading = &current[..current.len() - trimmed.len()];
+        let first = trimmed.split_whitespace().next().unwrap_or("");
+        if first.is_empty() {
+            break;
         }
-        if let Some(rest) = trimmed.strip_prefix(&format!("{} ", alias)) {
-            return format!("{}{} {}", leading, expansion, rest);
+
+        let expansion = ctx
+            .aliases
+            .get(first)
+            .map(|s| s.as_str())
+            .or_else(|| builtin_aliases.iter().find(|(a, _)| *a == first).map(|(_, v)| *v));
+
+        let Some(expansion) = expansion else {
+            break;
+        };
+
+        let rest = if trimmed.len() > first.len() {
+            trimmed[first.len()..].trim_start().to_string()
+        } else {
+            String::new()
+        };
+        let expanded = if rest.is_empty() {
+            format!("{}{}", leading, expansion)
+        } else {
+            format!("{}{} {}", leading, expansion, rest)
+        };
+        if expanded == current {
+            break;
         }
+        current = expanded;
     }
-    line.to_string()
+    current
 }
 
 fn print_banner(ctx: &Context) {
