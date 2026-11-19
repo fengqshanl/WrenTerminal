@@ -52,7 +52,7 @@ echo "ls -la" | .\target\release\wren.exe --batch
  \ \_/ / | |_) | |_____| | | \ |
   \___/  |____/          |_|  \_
 
- Wren v0.2.0  — A lightweight Linux-style shell on Windows (no WSL)
+ Wren v0.2.1  — A lightweight Linux-style shell on Windows (no WSL)
  欢迎, zhangzhe ! 输入 help 查看可用命令，exit 退出。
  提示: 支持管道 | · 重定向 > >> < · 变量 $VAR · 历史 ↑/↓ · 补全 Tab
 
@@ -92,7 +92,7 @@ zhangzhe@ZHE:~$
 `help` `exit` `clear` `pwd` `cd` `ls` `echo` `cat` `head` `tail` `wc` `grep` `find`
 `mkdir` `rmdir` `rm` `cp` `mv` `touch` `export` `unset` `env` `which` `history`
 `uname` `whoami` `hostname` `date` `seq` `true` `false` `type` `tree` `sleep`
-`apt` `apt-get` `sudo`
+`apt` `apt-get` `update` `man` `nproc` `free` `uptime`
 
 别名：`ll` → `ls -l`，`la` → `ls -a`，`..` → `cd ..`，`...` → `cd ../..`，`cls` → `clear`
 
@@ -131,25 +131,90 @@ sudo apt install 7zip        # sudo 是透明前缀，实际直接执行 apt
 - `sudo` 在 Windows 上没有真正的用户切换：`sudo <命令>` 会以当前权限直接执行，
   需要管理员权限的安装程序通常会自动弹出 UAC，失败时请右键“以管理员身份运行” Wren
 
-### 5. Linux → Windows 命令翻译
+### 5. 可选的 Git Bash 后备（大幅扩展 GNU 工具覆盖）
+
+Wren 本身不依赖 WSL / Cygwin / MSYS2，但如果你安装了 **Git for Windows**
+（很多开发机都有），Wren 会自动发现它的 `bash.exe`，并在以下场景把命令交给
+Git Bash 执行：
+
+- Windows PATH 中找不到的命令
+- Windows 有同名工具、但语义不同的 GNU 命令，例如：
+  `sed` `awk` `sort` `uniq` `cut` `tr` `tee` `xargs` `stat` `du` `df`
+  `chmod` `chown` `readlink` `realpath` `basename` `dirname`
+  `md5sum` `sha1sum` `sha256sum` `base64` `gzip` `gunzip` `bzip2` `xz`
+  `tar` `diff` `patch` `file` `xxd` `od` `split` `paste` `join`
+  `comm` `cmp` `nl` `fold` `fmt` `expand` `unexpand` `tac` `shuf`
+  `mktemp` `timeout` `less` `vim` `nano` `unzip` `id` `groups` `iconv` …
+
+```bash
+sed -i 's/foo/bar/g' file.txt
+awk '{print $2}' data.txt
+sort -k2 -n data.txt | uniq -c
+tar -czf backup.tar.gz src/
+md5sum README.md
+df -h
+```
+
+- `npm` / `pnpm` / `yarn` / `npx` 等 `.cmd` shim 会自动经 `cmd /C` 启动，可直接使用
+- `git` 自动带上 `-c core.quotepath=false`，中文文件名以 UTF-8 显示，而不是 `\345...` 转义
+- `ls` 按 CJK 显示宽度对齐中英文混合文件名
+- 关闭后备：`export WREN_NO_GITBASH=1`
+- 指定自定义 bash：`export WREN_GIT_BASH='D:\Tools\Git\bin\bash.exe'`
+
+> 说明：这能把常见 GNU 工具覆盖得比较完整，但 Windows 不是 Linux。
+> systemd、iptables、内核模块、`/proc`、APT/dpkg 等 Linux 专有机制没有等价物，
+> 这类场景仍建议使用 WSL。所谓“95% 命令”取决于日常命令集合：常规文件、文本、
+> 网络和开发工具基本可用，系统管理类命令需要逐个确认。
+
+### 6. Wren 自身更新
+
+- 交互式启动时读取 `~/.wren_update_check` 缓存；如果 GitHub Releases 上有更新，
+  会在启动横幅后提示（例如）：
+  ```
+  发现 Wren 新版本 v0.2.2（当前 v0.2.1）
+  运行 `update` 下载并安装，或访问 https://github.com/fengqshanl/WrenTerminal/releases
+  ```
+- 缓存 24 小时；过期后在后台检查，不阻塞提示符。网络失败缓存 6 小时。
+- 相关命令：
+  ```bash
+  update --check    # 只检查最新版本
+  update            # 下载并安装（会先确认）
+  update -y         # 自动确认（批处理模式必需）
+  ```
+- 更新流程：下载 MSI 到 `%TEMP%` → 校验文件头 → 请求 UAC → 等待当前 Wren 退出 →
+  `msiexec /passive` 安装。安装完成后重新打开 Wren。
+- 关闭启动检查：`export WREN_NO_UPDATE_CHECK=1`
+- 更新源：[GitHub Releases](https://github.com/fengqshanl/WrenTerminal/releases)
+
+### 7. Linux → Windows 命令翻译
 非内置命令在启动子进程前自动翻译，映射表见 `src/translator.rs`：
 
 | Linux 命令 | Windows 等价 |
 |---|---|
-| `ifconfig` / `ip` | `ipconfig` |
-| `ps` | `tasklist` |
+| `ip address` / `ip addr` | `ipconfig` |
+| `ip link` | `ipconfig /all` |
+| `ip route` | `route print` |
+| `ip neigh` | `arp -a` |
+| `ifconfig` / `ifconfig -a` | `ipconfig` / `ipconfig /all` |
+| `ps` / `ps aux` / `ps -ef` | `tasklist` |
+| `ps -p PID` | `tasklist /FI "PID eq PID"` |
+| `kill -9 PID` | `taskkill /F /PID PID` |
 | `killall` / `pkill` | `taskkill /F /IM` |
+| `netstat -tulpn` / `ss -tulpn` | `netstat -ano` |
+| `ping -c N` | `ping -n N` |
 | `top` / `htop` | `taskmgr` |
 | `open` / `xdg-open` | `cmd /c start ""` |
 | `ln -s` | `cmd /c mklink` |
 | `python3` | `python` |
-| `wget` | `curl` |
-| `grep`（兜底） | `findstr`（含参数转换） |
-| `yum` / `dnf` / `man` / `sed` 等 | 给出 Windows 替代方案提示（`apt` 与 `sudo` 已是内置命令，见上） |
+| `wget` | `curl -L`（含参数转换） |
+| `grep`（内置兜底） | `findstr`（含参数转换） |
+| `yum` / `dnf` / `brew` | 提示改用 `apt` |
 
-未命中的命令原样透传，因此 `git`、`curl`、`npm`、`dir`、`ipconfig` 等 Windows 原生/跨平台工具可直接调用。
+未命中的命令原样透传；如果安装了 Git for Windows，还会自动交给 Git Bash。
+因此 `git`、`curl`、`npm`、`pnpm`、`dir`、`ipconfig` 等可直接调用，
+`sed` / `awk` / `tar` / `sort` 等 GNU 工具也可用。
 
-### 6. 路径与环境
+### 8. 路径与环境
 - `/c/Users/foo` ↔ `C:\Users\foo` 自动互转；`~` 展开为主目录
 - PATH 在内部以 `:` 展示，启动子进程时转回 `;`
 - `export` 的变量立即同步到进程环境，子进程可见
@@ -166,9 +231,10 @@ src/
 ├── parser.rs        # 分词、引号、变量展开、管道/重定向/连接符解析
 ├── builtins.rs      # 内置命令实现 + 上下文(Env/cwd/history) + 输出类型
 ├── pkg.rs           # apt 风格包管理前端（winget / choco / scoop）
-├── winutil.rs       # 程序查找、管理员权限判断、控制台输出清理
+├── update.rs        # 启动更新检查、update 命令、MSI 下载与安装
+├── winutil.rs       # 程序查找、Git Bash 检测、权限判断、控制台输出清理
 ├── translator.rs    # Linux → Windows 命令映射表（可扩展）
-├── executor.rs      # 管道/重定向串联、外部进程启动、环境变量注入
+├── executor.rs      # 管道/重定向串联、外部进程启动、.cmd shim 与 Git Bash 后备
 ├── env.rs           # Linux 风格环境变量与 Windows 进程环境同步
 ├── pathutil.rs      # POSIX ↔ Windows 路径互转、~ 展开
 └── completer.rs     # Tab 补全（命令/文件/变量）
@@ -180,12 +246,13 @@ src/
 
 这是一个**兼容层 / 便利工具**，不是一个完整的 Linux 用户态。需要如实说明几点：
 
-1. **命令覆盖**：内置命令覆盖日常高频操作；Linux 有成千上万个独立程序，无法全部内置。未内置的命令走"翻译 + 透传"策略——能映射的映射，不能映射的直接交给 Windows（若系统没装则提示未找到）。
-2. **语义差异**：部分命令是简化实现（如 `grep` 是子串匹配而非完整正则，`find` 仅支持 `-name`）。复杂的 GNU 工具行为请用 Git Bash / MSYS2 / WSL。
+1. **命令覆盖**：内置命令覆盖日常高频操作；Linux 有成千上万个独立程序，无法全部内置。未内置的命令走“翻译 + 透传 + 可选 Git Bash 后备”策略——能映射的映射，不能映射的交给 Windows；装了 Git for Windows 时再交给 Git Bash。**“95% 命令”不是可保证的硬指标**：常规文件、文本、网络、开发工具覆盖较好，systemd / iptables / 内核 / `/proc` / APT 等 Linux 专有机制仍需 WSL。
+2. **语义差异**：部分内置命令是简化实现（如 `grep` 是子串匹配而非完整正则，`find` 仅支持 `-name`）。需要完整 GNU 行为时，安装 Git for Windows 后 Wren 会优先使用 `sed` / `awk` / `sort` / `tar` 等 GNU 工具；更完整的 Linux 用户态请用 WSL。
 3. **外部程序输出编码**：Windows 原生命令输出的中文在部分场景下可能受代码页影响；交互模式已尝试启用 UTF-8 与虚拟终端。
 4. **包管理**：`apt` 是 winget / Chocolatey / Scoop 的前端，不维护 Ubuntu 的 `.deb` 仓库与依赖树；软件包名称、版本和可用性由 Windows 包源决定，和 Ubuntu 并不一一对应。
 5. **权限**：Windows 没有真正的 `sudo`；`sudo <命令>` 会以当前权限直接执行。需要管理员权限的安装程序通常会弹出 UAC，失败时请右键“以管理员身份运行” Wren。
-6. **路径**：POSIX 绝对路径需写成 `/c/...`、`/d/...` 形式；`/usr/bin` 这类映射到当前盘根目录（仅为便利，不代表真实存在）。
+6. **自更新**：`update` 依赖 GitHub Releases 上有比当前版本更新的正式 Release；启动检查每 24 小时最多访问一次 GitHub API，可用 `WREN_NO_UPDATE_CHECK=1` 关闭。
+7. **路径**：POSIX 绝对路径需写成 `/c/...`、`/d/...` 形式；`/usr/bin` 这类映射到当前盘根目录（仅为便利，不代表真实存在）。
 
 ---
 
@@ -211,7 +278,8 @@ src/
 cargo test
 ```
 
-当前包含解析器、路径转换、拼音用户名映射、winget 表格解析、`sudo` 参数解析等单元测试，全部通过。
+当前包含解析器、路径转换、拼音用户名映射、winget 表格解析、`sudo` 参数解析、
+`ip` / `ps` / `kill` / `ping` 参数翻译、更新缓存与版本比较、Git Bash 后备等单元测试，全部通过。
 
 ---
 

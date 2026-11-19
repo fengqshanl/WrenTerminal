@@ -10,6 +10,9 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+const NOT_FOUND_HINT: &str =
+    "（可尝试 `help`；安装 Git for Windows 后可获得 sed/awk/sort/tar 等 GNU 工具）";
+
 /// 执行一整行（可能包含多条用 ; && || 连接的命令）。
 pub fn execute_line(line: &ParsedLine, ctx: &mut Context) -> Flow {
     for (conn, pipeline) in &line.pipelines {
@@ -69,7 +72,7 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
     let stages = &effective_stages;
 
     let single_external = stages.len() == 1
-        && !builtins::is_builtin(&stages[0].argv[0])
+        && !builtin_active(&stages[0].argv[0], ctx)
         && stages[0].redirect.input.is_none()
         && stages[0].redirect.output.is_none();
 
@@ -105,7 +108,7 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
             && std::io::stdin().is_terminal()
             && std::io::stdout().is_terminal();
 
-        let out = if builtins::is_builtin(&stage.argv[0]) {
+        let out = if builtin_active(&stage.argv[0], ctx) {
             builtins::run(&stage.argv[0], &stage.argv[1..], ctx, stdin_data.as_deref())
                 .unwrap_or_else(|| Output::err(format!("未知内置命令: {}", stage.argv[0])))
         } else {
@@ -305,7 +308,7 @@ fn run_interactive(stage: &Stage, ctx: &mut Context) -> Output {
         Ok(status) => Output::code(status.code().unwrap_or_else(|| if status.success() { 0 } else { 1 })),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                Output::err(format!("{}: 未找到命令（可尝试 `help` 查看可用命令）", program))
+                Output::err(format!("{}: 未找到命令{}", program, NOT_FOUND_HINT))
             } else {
                 Output::err(format!("{}: {}", program, e))
             }
@@ -328,7 +331,7 @@ fn run_captured(stage: &Stage, ctx: &Context, stdin_data: Option<&str>) -> Outpu
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                format!("{}: 未找到命令", program)
+                format!("{}: 未找到命令{}", program, NOT_FOUND_HINT)
             } else {
                 format!("{}: {}", program, e)
             };
@@ -381,7 +384,208 @@ fn prepare_command(stage: &Stage, ctx: &Context) -> (String, Vec<String>, Option
         };
         args.push(converted);
     }
-    (t.program, args, t.note)
+    let requested = stage.argv[0].clone();
+    let translated = t.program.clone();
+    let (program, args, found) = resolve_executable(t.program, args, ctx);
+    // 交给 Git Bash 时必须使用用户原始参数，否则 grep 等被翻译过的参数
+    // （例如 -E → /R）会被 GNU 工具误读。
+    if let Some((program, args)) =
+        git_bash_fallback(&requested, &translated, &stage.argv[1..], found, ctx)
+    {
+        return (program, args, t.note);
+    }
+    (program, args, t.note)
+}
+
+/// 有 Git Bash 时，少数内置命令改用 GNU 版本以获得完整参数/正则支持。
+fn builtin_active(name: &str, ctx: &Context) -> bool {
+    if !builtins::is_builtin(name) {
+        return false;
+    }
+    !builtin_bypassed(name, ctx)
+}
+
+fn builtin_bypassed(name: &str, ctx: &Context) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if !matches!(
+        lower.as_str(),
+        "grep" | "find" | "head" | "tail" | "wc" | "cat"
+    ) {
+        return false;
+    }
+    if git_bash_disabled() {
+        return false;
+    }
+    winutil::find_git_bash(&ctx.env.get_or("PATH", "")).is_some()
+}
+
+/// 把命令名解析为 PATH 中的真实程序。
+///
+/// Windows 的 `CreateProcess` 不能直接执行 `.cmd` / `.bat`（npm、pnpm、yarn、
+/// npx 等都是这种 shim），必须经 `cmd.exe /C` 启动；同时显式解析 PATH，
+/// 避免只装了 `.cmd` 的命令被误报“未找到”。
+fn resolve_executable(
+    program: String,
+    args: Vec<String>,
+    ctx: &Context,
+) -> (String, Vec<String>, bool) {
+    if !cfg!(windows) {
+        return (program, args, true);
+    }
+    let lower = program.to_ascii_lowercase();
+    if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+        let (p, a) = wrap_batch(program, args);
+        return (p, a, true);
+    }
+    // 显式路径（含目录）交给 cmd/系统处理，避免基于错误的工作目录做判断。
+    if program.contains('/') || program.contains('\\') {
+        return (program, args, true);
+    }
+
+    let path_var = ctx.env.get_or("PATH", "");
+    let Some(found) = winutil::find_program(&path_var, &program) else {
+        return (program, args, false);
+    };
+    let ext = found
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "cmd" | "bat" => {
+            let (p, a) = wrap_batch(found.to_string_lossy().to_string(), args);
+            (p, a, true)
+        }
+        "exe" | "com" => (found.to_string_lossy().to_string(), args, true),
+        // 无扩展名的裸文件无法由 CreateProcess 可靠启动，交给 Git Bash 后备。
+        _ => (program, args, false),
+    }
+}
+
+fn wrap_batch(program: String, args: Vec<String>) -> (String, Vec<String>) {
+    let mut new_args = Vec::with_capacity(args.len() + 2);
+    new_args.push("/C".to_string());
+    new_args.push(program);
+    new_args.extend(args);
+    ("cmd.exe".to_string(), new_args)
+}
+
+/// 命令找不到（或需要 GNU 语义）时，尝试经 Git Bash 执行。
+///
+/// 这是可选后备：没装 Git for Windows 时保持原行为，不影响 Wren 独立运行。
+fn git_bash_fallback(
+    requested: &str,
+    translated: &str,
+    args: &[String],
+    found: bool,
+    ctx: &Context,
+) -> Option<(String, Vec<String>)> {
+    if !cfg!(windows) || git_bash_disabled() {
+        return None;
+    }
+    if requested.contains('/') || requested.contains('\\') {
+        return None;
+    }
+    let identity = requested.eq_ignore_ascii_case(translated);
+    let use_git_bash = if identity {
+        !found || prefer_git_bash(requested)
+    } else {
+        prefer_git_bash(requested)
+    };
+    if !use_git_bash {
+        return None;
+    }
+
+    let bash = winutil::find_git_bash(&ctx.env.get_or("PATH", ""))?;
+    let mut bash_args = Vec::with_capacity(args.len() + 4);
+    bash_args.push("-c".into());
+    bash_args.push("exec \"$@\"".into());
+    bash_args.push("--".into());
+    bash_args.push(requested.to_string());
+    bash_args.extend(args.iter().cloned());
+    Some((bash.to_string_lossy().to_string(), bash_args))
+}
+
+fn git_bash_disabled() -> bool {
+    match std::env::var("WREN_NO_GITBASH") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Windows 自带同名工具但语义不同、应优先使用 GNU 版本的命令。
+fn prefer_git_bash(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "sed"
+            | "awk"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "find"
+            | "cat"
+            | "head"
+            | "tail"
+            | "wc"
+            | "sort"
+            | "uniq"
+            | "cut"
+            | "tr"
+            | "tee"
+            | "xargs"
+            | "stat"
+            | "du"
+            | "df"
+            | "chmod"
+            | "chown"
+            | "readlink"
+            | "realpath"
+            | "basename"
+            | "dirname"
+            | "md5sum"
+            | "sha1sum"
+            | "sha256sum"
+            | "sha512sum"
+            | "base64"
+            | "gzip"
+            | "gunzip"
+            | "bzip2"
+            | "xz"
+            | "tar"
+            | "diff"
+            | "patch"
+            | "file"
+            | "xxd"
+            | "od"
+            | "split"
+            | "paste"
+            | "join"
+            | "comm"
+            | "cmp"
+            | "nl"
+            | "fold"
+            | "fmt"
+            | "expand"
+            | "unexpand"
+            | "tac"
+            | "shuf"
+            | "mktemp"
+            | "timeout"
+            | "less"
+            | "id"
+            | "groups"
+            | "nproc"
+            | "locale"
+            | "iconv"
+            | "dos2unix"
+            | "unix2dos"
+            | "unzip"
+            | "vim"
+            | "nano"
+    )
 }
 
 #[cfg(test)]
@@ -460,5 +664,27 @@ mod tests {
         let out = run_pipeline(&parsed.pipelines[0].1, &mut ctx);
         assert_ne!(out.code, 0);
         assert!(out.stderr.contains("缺少命令"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_shim_is_launched_through_cmd() {
+        use crate::env::Env;
+        let dir = std::env::temp_dir().join(format!("wren_cmd_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let shim = dir.join("hello.cmd");
+        std::fs::write(&shim, "@echo hello\r\n").unwrap();
+
+        let mut ctx = Context::new(Env::new("test".into()));
+        ctx.env.set("PATH", &dir.to_string_lossy());
+        let (program, args, found) =
+            resolve_executable("hello".into(), vec!["-v".into()], &ctx);
+        assert!(found);
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(args[0], "/C");
+        assert!(args[1].ends_with("hello.cmd"));
+        assert_eq!(args[2], "-v");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

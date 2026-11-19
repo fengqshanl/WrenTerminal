@@ -20,4 +20,5 @@ pub mod pathutil;
 pub mod pkg;
 pub mod shell;
 pub mod translator;
+pub mod update;
 pub mod winutil;

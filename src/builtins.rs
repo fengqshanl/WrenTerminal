@@ -150,6 +150,11 @@ pub static BUILTINS: &[BuiltinInfo] = &[
     BuiltinInfo { name: "apt", usage: "apt <update|upgrade|install|remove|search|show|list|download> ...", desc: "软件包管理（类似 Ubuntu apt，后端 winget/choco/scoop）" },
     BuiltinInfo { name: "apt-get", usage: "apt-get <命令> ...", desc: "apt 的别名" },
     BuiltinInfo { name: "sudo", usage: "sudo <命令> [参数]", desc: "以当前权限执行命令（Windows 无真正的 sudo）" },
+    BuiltinInfo { name: "update", usage: "update [--check] [-y]", desc: "检查并安装 Wren 新版本" },
+    BuiltinInfo { name: "man", usage: "man [命令]", desc: "查看内置命令帮助（外部命令可用 --help）" },
+    BuiltinInfo { name: "nproc", usage: "nproc", desc: "显示可用 CPU 核心数" },
+    BuiltinInfo { name: "free", usage: "free [-h]", desc: "显示内存使用情况" },
+    BuiltinInfo { name: "uptime", usage: "uptime [-p]", desc: "显示系统运行时间" },
 ];
 
 /// 判断命令是否为内置命令。
@@ -160,7 +165,8 @@ pub fn is_builtin(name: &str) -> bool {
         "echo" | "cat" | "head" | "tail" | "wc" | "grep" | "find" | "mkdir" | "rmdir" |
         "rm" | "cp" | "mv" | "touch" | "export" | "unset" | "env" | "printenv" |
         "which" | "history" | "uname" | "whoami" | "hostname" | "date" | "seq" |
-        "true" | "false" | "type" | "tree" | "sleep" | "apt" | "apt-get"
+        "true" | "false" | "type" | "tree" | "sleep" | "apt" | "apt-get" | "update"
+        | "man" | "nproc" | "free" | "uptime"
     )
 }
 
@@ -210,6 +216,11 @@ pub fn run(name: &str, args: &[String], ctx: &mut Context, stdin: Option<&str>) 
         "tree" => cmd_tree(args, ctx),
         "sleep" => cmd_sleep(args),
         "apt" | "apt-get" => crate::pkg::run(&n, args, ctx),
+        "update" => crate::update::run(ctx, args),
+        "man" => cmd_man(args),
+        "nproc" => cmd_nproc(),
+        "free" => cmd_free(args),
+        "uptime" => cmd_uptime(args),
         _ => return None,
     };
     Some(out)
@@ -235,6 +246,7 @@ fn cmd_help(args: &[String]) -> Output {
     s.push_str("  - 支持管道 |、重定向 > >> <、连接符 && || ;\n");
     s.push_str("  - 支持变量 $VAR / ${VAR} / $? 与 ~ 展开\n");
     s.push_str("  - 非内置命令会自动翻译为 Windows 等价命令执行\n");
+    s.push_str("  - 安装 Git for Windows 后，未内置的 GNU 命令会自动交给 Git Bash 执行\n");
     s.push_str("  - 使用 `help <命令>` 查看具体用法\n");
     Output::ok(s)
 }
@@ -437,7 +449,28 @@ fn format_entry(path: &Path, long: bool, human: bool, color: bool) -> String {
 }
 
 fn display_width(s: &str) -> usize {
-    s.chars().count()
+    s.chars().map(char_width).sum()
+}
+
+/// 终端显示宽度：CJK 字符和常见 emoji 占两列。
+fn char_width(c: char) -> usize {
+    let u = c as u32;
+    if matches!(
+        u,
+        0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    ) {
+        2
+    } else {
+        1
+    }
 }
 
 fn human_size(n: u64) -> String {
@@ -893,17 +926,20 @@ fn cmd_which(args: &[String], ctx: &Context) -> Output {
     if args.is_empty() { return Output::err("which: 缺少命令名"); }
     let mut result = String::new();
     let mut missing = false;
-    let path = ctx.env.path_display();
+    let path = ctx.env.get_or("PATH", "");
     for name in args {
         if is_builtin(name) || name.eq_ignore_ascii_case("sudo") {
             result.push_str(&format!("{}: shell 内置命令\n", name));
             continue;
         }
         let mut found = false;
-        for dir in path.split([':', ';']) {
-            if dir.is_empty() { continue; }
+        for dir in crate::winutil::split_path(&path) {
+            let dir = dir.trim().trim_matches('"');
+            if dir.is_empty() {
+                continue;
+            }
             let d = ctx.resolve(dir);
-            for ext in [".exe", ".bat", ".cmd", ".com", ""] {
+            for ext in [".exe", ".cmd", ".bat", ".com", ""] {
                 let candidate = d.join(format!("{}{}", name, ext));
                 if candidate.is_file() {
                     result.push_str(&to_posix(&candidate));
@@ -921,7 +957,7 @@ fn cmd_which(args: &[String], ctx: &Context) -> Output {
 
 fn cmd_uname(args: &[String], ctx: &Context) -> Output {
     let all = args.iter().any(|a| a == "-a" || a == "--all");
-    let release = "0.1.0-Wren";
+    let release = concat!(env!("CARGO_PKG_VERSION"), "-Wren");
     let machine = if std::env::consts::ARCH == "x86_64" { "x86_64" } else { std::env::consts::ARCH };
     if all {
         Output::ok(format!(
@@ -937,6 +973,168 @@ fn cmd_uname(args: &[String], ctx: &Context) -> Output {
     } else {
         Output::ok("Linux")
     }
+}
+
+fn cmd_man(args: &[String]) -> Output {
+    let Some(name) = args.first() else {
+        return cmd_help(&[]);
+    };
+    let lower = name.to_ascii_lowercase();
+    if let Some(info) = BUILTINS.iter().find(|b| b.name == lower) {
+        return Output::ok(format!(
+            "{} - {}\n用法: {}",
+            info.name, info.desc, info.usage
+        ));
+    }
+    Output::ok(format!(
+        "{} 不是 Wren 内置命令。\n可运行 `{} --help` 查看外部工具帮助（Git Bash 提供的 GNU 工具通常支持 --help）。",
+        name, name
+    ))
+}
+
+fn cmd_nproc() -> Output {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    Output::ok(n.to_string())
+}
+
+#[repr(C)]
+#[allow(dead_code)]
+struct MemoryStatusEx {
+    length: u32,
+    memory_load: u32,
+    total_phys: u64,
+    avail_phys: u64,
+    total_page_file: u64,
+    avail_page_file: u64,
+    total_virtual: u64,
+    avail_virtual: u64,
+    avail_extended_virtual: u64,
+}
+
+#[cfg(windows)]
+fn memory_status() -> Option<MemoryStatusEx> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    unsafe {
+        let mut status: MemoryStatusEx = std::mem::zeroed();
+        status.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+        if GlobalMemoryStatusEx(&mut status) != 0 {
+            Some(status)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn memory_status() -> Option<MemoryStatusEx> {
+    None
+}
+
+fn cmd_free(args: &[String]) -> Output {
+    let human = args.iter().any(|a| a == "-h" || a == "--human");
+    let Some(status) = memory_status() else {
+        return Output::err("free: 无法读取 Windows 内存信息");
+    };
+    let total = status.total_phys;
+    let available = status.avail_phys;
+    let used = total.saturating_sub(available);
+    let swap_total = status.total_page_file.saturating_sub(total);
+    let swap_available = status
+        .avail_page_file
+        .saturating_sub(available)
+        .min(swap_total);
+    let swap_used = swap_total.saturating_sub(swap_available);
+
+    let fmt = |bytes: u64| {
+        if human {
+            human_size(bytes)
+        } else {
+            (bytes / 1024).to_string()
+        }
+    };
+    let header =
+        "               total        used        free      shared  buff/cache   available";
+    let mem = format!(
+        "Mem:    {:>12} {:>11} {:>11} {:>12} {:>11} {:>11}",
+        fmt(total),
+        fmt(used),
+        fmt(available),
+        "0",
+        "0",
+        fmt(available)
+    );
+    let swap = format!(
+        "Swap:   {:>12} {:>11} {:>11}",
+        fmt(swap_total),
+        fmt(swap_used),
+        fmt(swap_available)
+    );
+    Output::ok(format!("{}\n{}\n{}", header, mem, swap))
+}
+
+#[cfg(windows)]
+fn uptime_seconds() -> u64 {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    unsafe { GetTickCount64() / 1000 }
+}
+
+#[cfg(not(windows))]
+fn uptime_seconds() -> u64 {
+    0
+}
+
+fn cmd_uptime(args: &[String]) -> Output {
+    let secs = uptime_seconds();
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let minutes = (secs % 3600) / 60;
+
+    if args.iter().any(|a| a == "-p" || a == "--pretty") {
+        let mut parts = Vec::new();
+        if days > 0 {
+            parts.push(format!("{} day{}", days, if days == 1 { "" } else { "s" }));
+        }
+        if hours > 0 {
+            parts.push(format!(
+                "{} hour{}",
+                hours,
+                if hours == 1 { "" } else { "s" }
+            ));
+        }
+        if minutes > 0 || parts.is_empty() {
+            parts.push(format!(
+                "{} minute{}",
+                minutes,
+                if minutes == 1 { "" } else { "s" }
+            ));
+        }
+        return Output::ok(format!("up {}", parts.join(", ")));
+    }
+
+    let up = if days > 0 {
+        format!(
+            "{} day{}, {:02}:{:02}",
+            days,
+            if days == 1 { "" } else { "s" },
+            hours,
+            minutes
+        )
+    } else {
+        format!("{:02}:{:02}", hours, minutes)
+    };
+    Output::ok(format!(
+        " {} up {}, 1 user, load average: 0.00, 0.00, 0.00",
+        cmd_date(),
+        up
+    ))
 }
 
 fn cmd_seq(args: &[String]) -> Output {
@@ -958,10 +1156,22 @@ fn cmd_seq(args: &[String]) -> Output {
     Output::ok(result)
 }
 
-fn cmd_type(args: &[String], _ctx: &Context) -> Output {
+fn cmd_type(args: &[String], ctx: &Context) -> Output {
     let name = match args.first() { Some(n) => n, None => return Output::err("type: 缺少命令名") };
     if is_builtin(name) || name.eq_ignore_ascii_case("sudo") {
-        Output::ok(format!("{} 是 shell 内置命令", name))
+        let lower = name.to_ascii_lowercase();
+        let gnu = matches!(
+            lower.as_str(),
+            "grep" | "find" | "head" | "tail" | "wc" | "cat"
+        ) && crate::winutil::find_git_bash(&ctx.env.get_or("PATH", "")).is_some();
+        if gnu {
+            Output::ok(format!(
+                "{} 是 shell 内置命令（检测到 Git Bash 时将优先使用 GNU 版本）",
+                name
+            ))
+        } else {
+            Output::ok(format!("{} 是 shell 内置命令", name))
+        }
     } else {
         let t = super::translator::translate(name, &[]);
         Output::ok(format!("{} 是外部命令（将执行 {}）", name, t.program))
@@ -1072,5 +1282,34 @@ mod tests {
     fn date_format() {
         let s = cmd_date();
         assert!(s.contains(':'));
+    }
+
+    #[test]
+    fn nproc_is_positive() {
+        let out = cmd_nproc();
+        assert!(out.stdout.parse::<usize>().unwrap() > 0);
+    }
+
+    #[test]
+    fn display_width_counts_cjk_as_two() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("中文"), 4);
+        assert_eq!(display_width("a中b"), 4);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn free_reports_memory() {
+        let out = cmd_free(&[]);
+        assert_eq!(out.code, 0);
+        assert!(out.stdout.contains("Mem:"));
+        assert!(out.stdout.contains("Swap:"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uptime_reports_uptime() {
+        let out = cmd_uptime(&[]);
+        assert!(out.stdout.contains(" up "));
     }
 }

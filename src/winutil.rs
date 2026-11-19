@@ -59,13 +59,34 @@ fn executable_candidates(base: &std::path::Path) -> Vec<PathBuf> {
     ]
 }
 
-/// 拆分 PATH：优先按 `;`，否则按 `:`（且不会把 `C:\` 的冒号当作分隔符）。
+/// 拆分 PATH：同时兼容 Windows 的 `;` 和 Linux 风格的 `:`。
+///
+/// 关键点是不要把 `C:\` 里的冒号当成分隔符。这里用“当前段起始位置”
+/// 判断盘符冒号，因此单个 `C:\Tools`、`C:\A;C:\B` 以及 `/c/a:/d/b`
+/// 都能正确拆分。
 pub fn split_path(path_var: &str) -> Vec<String> {
-    if path_var.contains(';') {
-        path_var.split(';').map(|s| s.to_string()).collect()
-    } else {
-        path_var.split(':').map(|s| s.to_string()).collect()
+    let chars: Vec<char> = path_var.chars().collect();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut seg_start = 0usize;
+
+    for (i, &c) in chars.iter().enumerate() {
+        let drive_colon = c == ':'
+            && i == seg_start + 1
+            && chars
+                .get(seg_start)
+                .map(|ch| ch.is_ascii_alphabetic())
+                .unwrap_or(false);
+        if c == ';' || (c == ':' && !drive_colon) {
+            parts.push(current.clone());
+            current.clear();
+            seg_start = i + 1;
+        } else {
+            current.push(c);
+        }
     }
+    parts.push(current);
+    parts
 }
 
 /// 当前进程是否以管理员权限运行。
@@ -210,6 +231,60 @@ pub fn clean_console_text(input: &str) -> String {
     out
 }
 
+/// 查找可用的 Git Bash / MSYS2 bash，用于可选的 GNU 工具后备。
+///
+/// 只认常见安装位置，避免误把 `C:\Windows\System32\bash.exe`（WSL 启动器）
+/// 当成 Git Bash。可用 `WREN_GIT_BASH` 指定自定义路径。
+pub fn find_git_bash(path_var: &str) -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("WREN_GIT_BASH") {
+        let p = PathBuf::from(custom);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let mut roots = Vec::new();
+    for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Ok(base) = std::env::var(var) {
+            roots.push(PathBuf::from(base).join("Git"));
+        }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("Programs").join("Git"));
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        roots.push(
+            PathBuf::from(&home)
+                .join("scoop")
+                .join("apps")
+                .join("git")
+                .join("current"),
+        );
+    }
+    roots.push(PathBuf::from(r"C:\Program Files\Git"));
+    roots.push(PathBuf::from(r"C:\msys64"));
+
+    for root in roots {
+        for candidate in [
+            root.join("bin").join("bash.exe"),
+            root.join("usr").join("bin").join("bash.exe"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 最后看 PATH，但排除 WSL 的 System32\bash.exe。
+    if let Some(p) = find_program(path_var, "bash") {
+        let lower = p.to_string_lossy().to_ascii_lowercase();
+        if !lower.contains("\\windows\\system32\\") && !lower.contains("windowsapps") {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +310,15 @@ mod tests {
     fn split_path_handles_drive_letters() {
         let parts = split_path(r"C:\Windows;C:\Tools");
         assert_eq!(parts, vec![r"C:\Windows", r"C:\Tools"]);
+
+        // 单个 Windows 路径里没有分号时，不能把盘符冒号当分隔符。
+        assert_eq!(split_path(r"C:\Tools"), vec![r"C:\Tools"]);
+
+        // Linux 风格的冒号 PATH 仍然可以拆分。
+        assert_eq!(
+            split_path("/c/foo:/d/bar"),
+            vec!["/c/foo", "/d/bar"]
+        );
     }
 
     #[test]

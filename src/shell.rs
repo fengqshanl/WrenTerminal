@@ -6,6 +6,7 @@ use crate::env::Env;
 use crate::executor;
 use crate::parser;
 use crate::pathutil;
+use crate::update;
 use colored::Colorize;
 use rustyline::config::Builder;
 use rustyline::error::ReadlineError;
@@ -38,6 +39,25 @@ pub fn run() -> i32 {
 
     print_banner(&ctx);
 
+    // 启动更新检查：先读本地缓存（不阻塞），缓存过期才在后台访问 GitHub。
+    let home = ctx.env.home_string();
+    let current_version = env!("CARGO_PKG_VERSION");
+    let startup = update::startup_status(&home, current_version);
+    let mut announced_update: Option<String> = None;
+    if let Some(info) = startup.notice {
+        update::print_notice(&info, current_version);
+        announced_update = Some(info.version);
+    }
+    let update_rx = if startup.needs_refresh {
+        Some(update::spawn_refresh(
+            home.clone(),
+            current_version.to_string(),
+            ctx.env.get_or("PATH", ""),
+        ))
+    } else {
+        None
+    };
+
     let cwd_shared = Arc::new(RwLock::new(ctx.cwd.clone()));
     let helper = ShellHelper::new(cwd_shared.clone(), &ctx.env);
     let config = Builder::new()
@@ -55,7 +75,6 @@ pub fn run() -> i32 {
     };
     rl.set_helper(Some(helper));
 
-    let home = ctx.env.home_string();
     let hist_path = Path::new(&home).join(".wren_history");
     if rl.load_history(&hist_path).is_ok() {
         for entry in rl.history().iter() {
@@ -64,6 +83,15 @@ pub fn run() -> i32 {
     }
 
     loop {
+        // 后台检查完成后，在下一次提示符前显示更新提示，避免打断正在输入的行。
+        if let Some(rx) = &update_rx {
+            while let Ok(info) = rx.try_recv() {
+                if announced_update.as_deref() != Some(info.version.as_str()) {
+                    update::print_notice(&info, current_version);
+                    announced_update = Some(info.version);
+                }
+            }
+        }
         let prompt = build_prompt(&ctx);
         match rl.readline(&prompt) {
             Ok(line) => {
