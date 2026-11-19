@@ -14,6 +14,10 @@ pub struct Context {
     pub history: Vec<String>,
     /// 是否给输出着色（管道中间阶段会自动关闭）。
     pub color: bool,
+    /// 当前命令是否直接连着终端（决定 apt 等命令能否显示实时进度）。
+    pub interactive: bool,
+    /// 是否已经提示过 Windows 下 sudo 的语义（每个会话只提示一次）。
+    pub sudo_hint_shown: bool,
 }
 
 impl Context {
@@ -24,6 +28,8 @@ impl Context {
             cwd,
             history: Vec::new(),
             color: true,
+            interactive: true,
+            sudo_hint_shown: false,
         }
     }
 
@@ -141,6 +147,9 @@ pub static BUILTINS: &[BuiltinInfo] = &[
     BuiltinInfo { name: "type", usage: "type 命令", desc: "显示命令类型" },
     BuiltinInfo { name: "tree", usage: "tree [路径]", desc: "树形显示目录" },
     BuiltinInfo { name: "sleep", usage: "sleep 秒数", desc: "等待指定秒数" },
+    BuiltinInfo { name: "apt", usage: "apt <update|upgrade|install|remove|search|show|list|download> ...", desc: "软件包管理（类似 Ubuntu apt，后端 winget/choco/scoop）" },
+    BuiltinInfo { name: "apt-get", usage: "apt-get <命令> ...", desc: "apt 的别名" },
+    BuiltinInfo { name: "sudo", usage: "sudo <命令> [参数]", desc: "以当前权限执行命令（Windows 无真正的 sudo）" },
 ];
 
 /// 判断命令是否为内置命令。
@@ -151,7 +160,7 @@ pub fn is_builtin(name: &str) -> bool {
         "echo" | "cat" | "head" | "tail" | "wc" | "grep" | "find" | "mkdir" | "rmdir" |
         "rm" | "cp" | "mv" | "touch" | "export" | "unset" | "env" | "printenv" |
         "which" | "history" | "uname" | "whoami" | "hostname" | "date" | "seq" |
-        "true" | "false" | "type" | "tree" | "sleep"
+        "true" | "false" | "type" | "tree" | "sleep" | "apt" | "apt-get"
     )
 }
 
@@ -200,6 +209,7 @@ pub fn run(name: &str, args: &[String], ctx: &mut Context, stdin: Option<&str>) 
         "type" => cmd_type(args, ctx),
         "tree" => cmd_tree(args, ctx),
         "sleep" => cmd_sleep(args),
+        "apt" | "apt-get" => crate::pkg::run(&n, args, ctx),
         _ => return None,
     };
     Some(out)
@@ -885,7 +895,7 @@ fn cmd_which(args: &[String], ctx: &Context) -> Output {
     let mut missing = false;
     let path = ctx.env.path_display();
     for name in args {
-        if is_builtin(name) {
+        if is_builtin(name) || name.eq_ignore_ascii_case("sudo") {
             result.push_str(&format!("{}: shell 内置命令\n", name));
             continue;
         }
@@ -950,7 +960,7 @@ fn cmd_seq(args: &[String]) -> Output {
 
 fn cmd_type(args: &[String], _ctx: &Context) -> Output {
     let name = match args.first() { Some(n) => n, None => return Output::err("type: 缺少命令名") };
-    if is_builtin(name) {
+    if is_builtin(name) || name.eq_ignore_ascii_case("sudo") {
         Output::ok(format!("{} 是 shell 内置命令", name))
     } else {
         let t = super::translator::translate(name, &[]);

@@ -4,8 +4,9 @@ use crate::builtins::{self, Context, Flow, Output};
 use crate::parser::{Conn, ParsedLine, Pipeline, Stage};
 use crate::pathutil;
 use crate::translator;
+use crate::winutil;
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -56,7 +57,17 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
         return Output::ok("");
     }
 
-    let stages = &pipeline.stages;
+    // 先展开 sudo 前缀：`sudo <命令>` 在当前 shell 内以当前权限执行，
+    // 不再像旧实现那样启动一个空的 cmd.exe。
+    let mut effective_stages: Vec<Stage> = Vec::with_capacity(pipeline.stages.len());
+    for stage in &pipeline.stages {
+        match rewrite_sudo(stage, ctx) {
+            SudoRewrite::Stage(s) => effective_stages.push(s),
+            SudoRewrite::Done(out) => return out,
+        }
+    }
+    let stages = &effective_stages;
+
     let single_external = stages.len() == 1
         && !builtins::is_builtin(&stages[0].argv[0])
         && stages[0].redirect.input.is_none()
@@ -87,6 +98,12 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
 
         // 管道中间阶段关闭颜色，避免 ANSI 进入下游
         ctx.color = i + 1 == stages.len() && stage.redirect.output.is_none();
+        // 只有“单条内置命令 + 无重定向 + 真正的终端”才允许交互式输出/进度条。
+        ctx.interactive = stages.len() == 1
+            && stage.redirect.input.is_none()
+            && stage.redirect.output.is_none()
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal();
 
         let out = if builtins::is_builtin(&stage.argv[0]) {
             builtins::run(&stage.argv[0], &stage.argv[1..], ctx, stdin_data.as_deref())
@@ -129,6 +146,145 @@ fn run_pipeline(pipeline: &Pipeline, ctx: &mut Context) -> Output {
 
     last.stderr = accumulated_err;
     last
+}
+
+// ---------------------------------------------------------------------------
+// sudo 前缀处理
+// ---------------------------------------------------------------------------
+
+enum SudoRewrite {
+    Stage(Stage),
+    Done(Output),
+}
+
+enum SudoAction {
+    Run(Vec<String>),
+    Info(String),
+    Silent,
+    Error(String),
+}
+
+/// 把 `sudo <命令>` 改写为 `<命令>`，在当前 shell/进程里执行。
+fn rewrite_sudo(stage: &Stage, ctx: &mut Context) -> SudoRewrite {
+    let is_sudo = stage
+        .argv
+        .first()
+        .map(|a| a.eq_ignore_ascii_case("sudo"))
+        .unwrap_or(false);
+    if !is_sudo {
+        return SudoRewrite::Stage(stage.clone());
+    }
+
+    match parse_sudo_args(&stage.argv[1..]) {
+        SudoAction::Run(argv) => {
+            if !winutil::is_elevated() && !ctx.sudo_hint_shown {
+                ctx.sudo_hint_shown = true;
+                eprintln!(
+                    "提示：Windows 没有真正的 sudo，命令将以当前权限执行；\
+                     需要管理员权限的安装程序通常会弹出 UAC，失败时请以管理员身份运行 Wren。"
+                );
+            }
+            SudoRewrite::Stage(Stage {
+                argv,
+                redirect: stage.redirect.clone(),
+            })
+        }
+        SudoAction::Info(text) => SudoRewrite::Done(Output::ok(text)),
+        SudoAction::Silent => SudoRewrite::Done(Output::code(0)),
+        SudoAction::Error(text) => SudoRewrite::Done(Output::err(text)),
+    }
+}
+
+fn parse_sudo_args(args: &[String]) -> SudoAction {
+    let mut i = 0;
+    let mut login_shell = false;
+    let mut control_only = false;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            i += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        match arg.as_str() {
+            "-V" | "--version" => {
+                return SudoAction::Info(format!(
+                    "sudo (Wren) {} — Windows 上没有真正的 sudo。\n\
+                     使用 `sudo <命令>` 会以当前权限直接执行该命令。",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            "-l" | "--list" => return SudoAction::Info(admin_status()),
+            "--help" | "-?" => return SudoAction::Info(sudo_help()),
+            // 单独 `sudo -h` 按帮助处理；带参数时沿用 sudo 的 -h <host> 语义。
+            "-h" if args.len() == 1 => return SudoAction::Info(sudo_help()),
+            "-h" | "--host" => {
+                i += 2;
+                continue;
+            }
+            "-k" | "-K" | "-v" => {
+                control_only = true;
+                i += 1;
+            }
+            "-i" | "-s" | "--login" | "--shell" => {
+                login_shell = true;
+                i += 1;
+            }
+            "-u" | "--user" | "-g" | "--group" | "-p" | "--prompt" | "-C"
+            | "--close-from" | "-D" | "--chdir" | "-r" | "--role" | "-t"
+            | "--type" | "-U" | "--other-user" | "-T" | "--command-timeout" => {
+                // 这些选项带一个参数，直接跳过。
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    if i < args.len() {
+        return SudoAction::Run(args[i..].to_vec());
+    }
+    if control_only {
+        return SudoAction::Silent;
+    }
+    if login_shell {
+        return SudoAction::Error(
+            "sudo: Wren 不支持 sudo -i/-s 打开管理员子 shell。\n\
+             请右键 Wren 选择“以管理员身份运行”，或直接运行 sudo <命令>。"
+                .into(),
+        );
+    }
+    SudoAction::Error("sudo: 缺少命令\n用法: sudo <命令> [参数]".into())
+}
+
+fn admin_status() -> String {
+    let level = if winutil::is_elevated() {
+        "管理员"
+    } else {
+        "普通用户"
+    };
+    format!(
+        "sudo (Wren)：当前进程以{}权限运行。\n\
+         Windows 没有 sudo 的用户切换机制；`sudo <命令>` 会以当前权限直接执行。",
+        level
+    )
+}
+
+fn sudo_help() -> String {
+    "用法: sudo <命令> [参数]\n\
+     \n\
+     Wren 在 Windows 上模拟 sudo：去掉 sudo 前缀后直接执行命令。\n\
+     如果命令需要管理员权限，安装程序通常会弹出 UAC；若失败，请右键\n\
+     以管理员身份运行 Wren。\n\
+     \n\
+     可用选项:\n\
+     \x20 -l, --list      显示当前权限\n\
+     \x20 -V, --version   显示版本\n\
+     \x20 -k, -v          兼容 sudo 的空操作\n\
+     \x20 -u <用户>       接受但忽略（Windows 无用户切换）"
+        .into()
 }
 
 /// 启动交互式外部程序（继承 stdin/stdout/stderr）。
@@ -226,4 +382,83 @@ fn prepare_command(stage: &Stage, ctx: &Context) -> (String, Vec<String>, Option
         args.push(converted);
     }
     (t.program, args, t.note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn sudo_strips_prefix() {
+        match parse_sudo_args(&args(&["apt", "update"])) {
+            SudoAction::Run(cmd) => assert_eq!(cmd, args(&["apt", "update"])),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn sudo_skips_value_options() {
+        match parse_sudo_args(&args(&["-u", "root", "-E", "apt", "install", "git"])) {
+            SudoAction::Run(cmd) => assert_eq!(cmd, args(&["apt", "install", "git"])),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn sudo_without_command_is_an_error() {
+        assert!(matches!(
+            parse_sudo_args(&args(&[])),
+            SudoAction::Error(_)
+        ));
+    }
+
+    #[test]
+    fn sudo_k_is_silent() {
+        assert!(matches!(
+            parse_sudo_args(&args(&["-k"])),
+            SudoAction::Silent
+        ));
+    }
+
+    #[test]
+    fn sudo_list_reports_permission() {
+        assert!(matches!(
+            parse_sudo_args(&args(&["-l"])),
+            SudoAction::Info(_)
+        ));
+    }
+
+    #[test]
+    fn sudo_login_shell_is_rejected() {
+        assert!(matches!(
+            parse_sudo_args(&args(&["-i"])),
+            SudoAction::Error(_)
+        ));
+    }
+
+    #[test]
+    fn sudo_echo_executes_inside_shell() {
+        use crate::env::Env;
+        use crate::parser;
+        let mut ctx = Context::new(Env::new("test".into()));
+        let parsed = parser::parse("sudo echo hi", &ctx.env).unwrap();
+        let out = run_pipeline(&parsed.pipelines[0].1, &mut ctx);
+        assert_eq!(out.stdout, "hi\n");
+        assert_eq!(out.code, 0);
+    }
+
+    #[test]
+    fn sudo_alone_is_not_a_cmd_shell() {
+        use crate::env::Env;
+        use crate::parser;
+        let mut ctx = Context::new(Env::new("test".into()));
+        let parsed = parser::parse("sudo", &ctx.env).unwrap();
+        let out = run_pipeline(&parsed.pipelines[0].1, &mut ctx);
+        assert_ne!(out.code, 0);
+        assert!(out.stderr.contains("缺少命令"));
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "wren"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Wren - A lightweight Linux-style command-line compatibility shell for Windows, written in Rust."
 authors = ["Wren contributors"]

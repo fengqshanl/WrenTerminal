@@ -33,9 +33,6 @@ const COMMAND_MAP: &[(&str, &str)] = &[
     ("start", "start"),
     // 包管理 / shell 工具（给出提示）
     ("man", "man"),
-    ("sudo", "sudo"),
-    ("apt", "apt"),
-    ("apt-get", "apt"),
     ("yum", "yum"),
     ("dnf", "dnf"),
     ("brew", "brew"),
@@ -192,16 +189,11 @@ pub fn translate(program: &str, args: &[String]) -> Translation {
                 program
             )),
         },
-        "sudo" => Translation {
-            program: "cmd".into(),
-            args: vec![],
-            note: Some("提示：Windows 无 sudo，请以管理员身份运行终端".into()),
-        },
-        "apt" | "apt-get" | "yum" | "dnf" | "brew" => Translation {
+        "yum" | "dnf" | "brew" => Translation {
             program: "echo".into(),
             args: vec![],
             note: Some(format!(
-                "提示：{} 是 Linux 包管理器，Windows 请使用 winget / choco / scoop",
+                "提示：{} 是 Linux/macOS 包管理器；Wren 中请使用 apt（后端为 winget），例如：apt install <软件包>",
                 program
             )),
         },
@@ -218,11 +210,84 @@ pub fn translate(program: &str, args: &[String]) -> Translation {
                 program
             )),
         },
-        "wget" => Translation {
-            program: "curl".into(),
-            args: args.iter().map(|a| translate_wget_arg(a)).collect(),
-            note: Some("提示：wget 已映射到 curl".into()),
-        },
+        "wget" => {
+            let mut out: Vec<String> = vec!["-L".into()];
+            let mut has_output = false;
+            let mut i = 0;
+            while i < args.len() {
+                let a = &args[i];
+                match a.as_str() {
+                    "-O" | "--output-document" => {
+                        out.push("-o".into());
+                        if let Some(v) = args.get(i + 1) {
+                            out.push(v.clone());
+                            has_output = true;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    "-q" | "--quiet" => {
+                        out.push("-s".into());
+                        i += 1;
+                    }
+                    "-nv" | "--no-verbose" => {
+                        out.push("-sS".into());
+                        i += 1;
+                    }
+                    "-c" | "--continue" => {
+                        out.push("-C".into());
+                        out.push("-".into());
+                        i += 1;
+                    }
+                    "--no-check-certificate" => {
+                        out.push("-k".into());
+                        i += 1;
+                    }
+                    "-P" | "--directory-prefix" => {
+                        out.push("--output-dir".into());
+                        if let Some(v) = args.get(i + 1) {
+                            out.push(v.clone());
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    _ if a.starts_with("--output-document=") => {
+                        out.push("-o".into());
+                        out.push(a["--output-document=".len()..].to_string());
+                        has_output = true;
+                        i += 1;
+                    }
+                    _ if a.starts_with("--header=") => {
+                        out.push("-H".into());
+                        out.push(a["--header=".len()..].to_string());
+                        i += 1;
+                    }
+                    _ if a.starts_with("--user-agent=") => {
+                        out.push("-A".into());
+                        out.push(a["--user-agent=".len()..].to_string());
+                        i += 1;
+                    }
+                    _ => {
+                        out.push(a.clone());
+                        i += 1;
+                    }
+                }
+            }
+            if !has_output {
+                // wget 默认按 URL 中的文件名保存，curl 用 -O 表达同样行为。
+                out.push("-O".into());
+            }
+            Translation {
+                program: "curl".into(),
+                args: out,
+                note: Some(
+                    "提示：wget 已映射为 curl -L（默认保存到当前目录，可用 -O 指定文件名）"
+                        .into(),
+                ),
+            }
+        }
 
         _ => Translation {
             program: map_program(program),
@@ -232,11 +297,40 @@ pub fn translate(program: &str, args: &[String]) -> Translation {
     }
 }
 
-fn translate_wget_arg(a: &str) -> String {
-    match a {
-        "-q" | "--quiet" => "-s".into(),
-        "-O" => "-o".into(),
-        "-c" | "--continue" => "-C".into(),
-        _ => a.to_string(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn wget_maps_output_and_quiet() {
+        let t = translate(
+            "wget",
+            &args(&["-q", "-O", "out.zip", "https://example.com/file.zip"]),
+        );
+        assert_eq!(t.program, "curl");
+        assert!(t.args.contains(&"-L".to_string()));
+        assert!(t.args.contains(&"-s".to_string()));
+        assert!(t.args.contains(&"-o".to_string()));
+        assert!(t.args.contains(&"out.zip".to_string()));
+        // -O 已在 wget 参数中出现，不应再追加 curl 的 -O。
+        assert!(!t.args.contains(&"-O".to_string()));
+    }
+
+    #[test]
+    fn wget_defaults_to_remote_name() {
+        let t = translate("wget", &args(&["https://example.com/file.zip"]));
+        assert_eq!(t.program, "curl");
+        assert!(t.args.contains(&"-O".to_string()));
+    }
+
+    #[test]
+    fn wget_continue_maps_to_curl_range() {
+        let t = translate("wget", &args(&["-c", "https://example.com/file.zip"]));
+        let pos = t.args.iter().position(|a| a == "-C").unwrap();
+        assert_eq!(t.args.get(pos + 1).map(|s| s.as_str()), Some("-"));
     }
 }
