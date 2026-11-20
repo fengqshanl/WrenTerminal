@@ -977,7 +977,10 @@ pub fn detect_wsl() -> Result<Vec<WslDistro>, String> {
 pub fn detect_wsl_async() -> mpsc::Receiver<Result<Vec<WslDistro>, String>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = tx.send(detect_wsl());
+        // 探测过程中即使出现 panic，也把错误送回界面，而不是让线程静默消失。
+        let result = std::panic::catch_unwind(detect_wsl)
+            .unwrap_or_else(|_| Err("检测 WSL 发行版时发生内部错误".to_string()));
+        let _ = tx.send(result);
     });
     rx
 }
@@ -985,6 +988,16 @@ pub fn detect_wsl_async() -> mpsc::Receiver<Result<Vec<WslDistro>, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_wsl_handles_odd_length_and_utf16() {
+        // 奇数长度：最后一个不完整单元应被忽略，而不是 panic。
+        let s = decode_wsl(&[b'A', 0, b'B']);
+        assert!(s.contains('A'));
+        // 带 BOM 的 UTF-16LE。
+        let s = decode_wsl(&[0xFF, 0xFE, b'H', 0, b'i', 0]);
+        assert_eq!(s, "Hi");
+    }
 
     fn sample() -> String {
         [

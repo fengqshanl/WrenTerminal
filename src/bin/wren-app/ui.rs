@@ -1051,7 +1051,10 @@ pub fn terminal_area(app: &mut WrenApp, ui: &mut egui::Ui) {
 
     {
         let session = &mut app.sessions[idx];
-        let backend = session.backend.as_mut().expect("backend checked above");
+        // 上面虽然已经检查过；这里再用 let-else 兜底，避免状态被并发修改时 panic。
+        let Some(backend) = session.backend.as_mut() else {
+            return;
+        };
         egui::Frame::NONE
             .fill(Color32::from_rgb(10, 16, 26))
             .inner_margin(Margin::symmetric(8, 6))

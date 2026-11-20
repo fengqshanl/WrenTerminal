@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# 安装包暂存目录里的构建产物（CI 打包时自动复制）
+installer/staging/wren-app.exe
+
 # WiX 工具集（40MB，从 NuGet 下载，不需提交）
 /.wix-tools/
 

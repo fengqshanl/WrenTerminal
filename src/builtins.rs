@@ -728,13 +728,27 @@ fn cmd_grep(args: &[String], stdin: Option<&str>, ctx: &Context) -> Output {
                         if multi { result.push_str(name); result.push(':'); }
                         if line_number { result.push_str(&format!("{}:", i + 1)); }
                         if only_matching {
+                            // 空模式在 GNU grep -o 下不输出内容。这里显式处理，
+                            // 避免 `hay[pos..]` 落在 UTF-8 多字节字符中间而 panic。
+                            if needle.is_empty() {
+                                continue;
+                            }
                             // 输出匹配到的子串（可多次出现）
-                            let mut pos = 0;
-                            while let Some(idx) = hay[pos..].find(&needle) {
-                                let start = pos + idx;
-                                result.push_str(&line[start..start + needle.len()]);
-                                result.push('\n');
-                                pos = start + needle.len().max(1);
+                            let mut search_from = 0;
+                            while let Some(idx) = hay
+                                .get(search_from..)
+                                .and_then(|rest| rest.find(&needle))
+                            {
+                                let start = search_from + idx;
+                                let end = start + needle.len();
+                                match line.get(start..end) {
+                                    Some(m) => {
+                                        result.push_str(m);
+                                        result.push('\n');
+                                    }
+                                    None => break,
+                                }
+                                search_from = end;
                             }
                             if !hay.contains(&needle) { result.push_str(line); result.push('\n'); }
                         } else {
@@ -770,6 +784,19 @@ fn cmd_find(args: &[String], ctx: &Context) -> Output {
 }
 
 fn walk_find(dir: &Path, pattern: &str, out: &mut String) {
+    walk_find_inner(dir, pattern, out, 0);
+}
+
+/// 递归遍历目录（`find` 的实现）。
+///
+/// - 限制递归深度，避免超深目录把调用栈撑爆；
+/// - 不进入符号链接 / 目录联接（junction）：它们可以指回上层目录，
+///   不做拦截会陷入无限递归直到栈溢出。
+fn walk_find_inner(dir: &Path, pattern: &str, out: &mut String, depth: usize) {
+    const MAX_DEPTH: usize = 64;
+    if depth > MAX_DEPTH {
+        return;
+    }
     let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -778,7 +805,12 @@ fn walk_find(dir: &Path, pattern: &str, out: &mut String) {
             out.push_str(&to_posix(&path));
             out.push('\n');
         }
-        if path.is_dir() { walk_find(&path, pattern, out); }
+        let is_link = fs::symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true);
+        if !is_link && path.is_dir() {
+            walk_find_inner(&path, pattern, out, depth + 1);
+        }
     }
 }
 
@@ -870,7 +902,9 @@ fn cmd_cp(args: &[String], ctx: &Context) -> Output {
         else { true }
     }).cloned().collect();
     if items.len() < 2 { return Output::err("cp: 用法: cp [-r] 源 目标"); }
-    let dst = items.pop().unwrap();
+    let Some(dst) = items.pop() else {
+        return Output::err("cp: 用法: cp [-r] 源 目标");
+    };
     let dst_path = ctx.resolve(&dst);
     let multi = items.len() > 1;
     for src in items {
@@ -905,7 +939,9 @@ fn copy_path(src: &Path, dst: &Path, recursive: bool) -> std::io::Result<()> {
 
 fn cmd_mv(args: &[String], ctx: &Context) -> Output {
     if args.len() < 2 { return Output::err("mv: 用法: mv 源 目标"); }
-    let dst = args.last().unwrap();
+    let Some(dst) = args.last() else {
+        return Output::err("mv: 用法: mv 源 目标");
+    };
     let dst_path = ctx.resolve(dst);
     let multi = args.len() > 2;
     for src in &args[..args.len() - 1] {
@@ -1257,13 +1293,39 @@ fn cmd_seq(args: &[String]) -> Output {
     };
     let mut result = String::new();
     if step == 0 { return Output::err("seq: 步长不能为 0"); }
+    // 防御性上限：`seq 100000000000` 之类会瞬间耗尽内存。
+    const MAX_LINES: usize = 1_000_000;
+    let mut lines = 0usize;
+    let mut truncated = false;
     let mut v = start;
+    // 用 checked_add 递增：`seq 9223372036854775807` 在 release 下会静默回绕，
+    // 造成死循环；这里遇到溢出直接结束。
     if step > 0 {
-        while v <= end { result.push_str(&format!("{}\n", v)); v += step; }
+        while v <= end {
+            if lines >= MAX_LINES { truncated = true; break; }
+            result.push_str(&format!("{}\n", v));
+            lines += 1;
+            match v.checked_add(step) {
+                Some(next) => v = next,
+                None => break,
+            }
+        }
     } else {
-        while v >= end { result.push_str(&format!("{}\n", v)); v += step; }
+        while v >= end {
+            if lines >= MAX_LINES { truncated = true; break; }
+            result.push_str(&format!("{}\n", v));
+            lines += 1;
+            match v.checked_add(step) {
+                Some(next) => v = next,
+                None => break,
+            }
+        }
     }
-    Output::ok(result)
+    let mut out = Output::ok(result);
+    if truncated {
+        out.stderr = format!("seq: 输出超过 {MAX_LINES} 行，已截断\n");
+    }
+    out
 }
 
 fn cmd_type(args: &[String], ctx: &Context) -> Output {
@@ -1421,5 +1483,20 @@ mod tests {
     fn uptime_reports_uptime() {
         let out = cmd_uptime(&[]);
         assert!(out.stdout.contains(" up "));
+    }
+
+    #[test]
+    fn grep_only_matching_is_panic_safe() {
+        let ctx = Context::new(Env::new("wren-test".into()));
+        // 空模式：GNU grep -o 不输出内容；旧实现会在中文的多字节边界上 panic。
+        let out = cmd_grep(&["-o".into(), "".into()], Some("中文内容\n"), &ctx);
+        assert_eq!(out.code, 0);
+        assert!(out.stdout.is_empty());
+        // 中文模式匹配：切片必须落在 UTF-8 字符边界上。
+        let out = cmd_grep(&["-o".into(), "中文".into()], Some("中文和中文\n"), &ctx);
+        assert_eq!(out.stdout, "中文\n中文\n");
+        // 不区分大小写的 ASCII 匹配仍然正常。
+        let out = cmd_grep(&["-o".into(), "-i".into(), "ab".into()], Some("ABab\n"), &ctx);
+        assert_eq!(out.stdout, "AB\nab\n");
     }
 }

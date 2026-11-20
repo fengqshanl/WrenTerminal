@@ -148,7 +148,8 @@ impl From<TerminalSize> for WindowSize {
 
 pub struct TerminalBackend {
     pub id: u64,
-    pub url_regex: RegexSearch,
+    /// 链接识别正则。构造失败时为 None（仅关闭链接识别，不影响终端本身）。
+    pub url_regex: Option<RegexSearch>,
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
     notifier: Notifier,
@@ -185,7 +186,15 @@ impl TerminalBackend {
         let pty_event_loop =
             EventLoop::new(term.clone(), event_proxy, pty, false, false)?;
         let notifier = Notifier(pty_event_loop.channel());
-        let url_regex = RegexSearch::new(r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#).unwrap();
+        // 链接识别用的正则；即使将来正则写法有误，也只是关闭链接识别，
+        // 不应该让整个终端会话创建失败。
+        let url_regex = match RegexSearch::new(r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                crate::config::log(&format!("链接识别正则初始化失败，已禁用超链接: {e}"));
+                None
+            }
+        };
         let _pty_event_loop_thread = pty_event_loop.spawn();
         let _pty_event_subscription = std::thread::Builder::new()
             .name(format!("pty_event_subscription_{}", id))
@@ -193,15 +202,23 @@ impl TerminalBackend {
                 // 原实现有两个问题：接收端断开后 `if let Ok` 会空转占满 CPU；
                 // 应用关闭标签、丢弃事件接收端时 send 失败会 panic。
                 // 这里让两种情况都安静地退出。
-                while let Ok(event) = event_receiver.recv() {
-                    let is_exit = matches!(event, Event::Exit);
-                    if pty_event_proxy_sender.send((id, event)).is_err() {
-                        break;
+                // 整段再包一层 catch_unwind：单个会话的事件线程异常不应波及其它标签页。
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    while let Ok(event) = event_receiver.recv() {
+                        let is_exit = matches!(event, Event::Exit);
+                        if pty_event_proxy_sender.send((id, event)).is_err() {
+                            break;
+                        }
+                        app_context.request_repaint();
+                        if is_exit {
+                            break;
+                        }
                     }
-                    app_context.request_repaint();
-                    if is_exit {
-                        break;
-                    }
+                }));
+                if outcome.is_err() {
+                    crate::config::log(&format!(
+                        "终端事件订阅线程异常退出（id={id}），该会话可能已断开"
+                    ));
                 }
             })?;
 
@@ -311,11 +328,10 @@ impl TerminalBackend {
     ) {
         match link_action {
             LinkAction::Hover => {
-                self.last_content.hovered_hyperlink = self.regex_match_at(
-                    terminal,
-                    point,
-                    &mut self.url_regex.clone(),
-                );
+                self.last_content.hovered_hyperlink = match self.url_regex.clone() {
+                    Some(mut regex) => self.regex_match_at(terminal, point, &mut regex),
+                    None => None,
+                };
             },
             LinkAction::Clear => {
                 self.last_content.hovered_hyperlink = None;
@@ -339,9 +355,11 @@ impl TerminalBackend {
                 }
             }
 
-            open::that(url).unwrap_or_else(|_| {
-                panic!("link opening is failed");
-            })
+            // 打不开链接（系统未注册处理程序、权限不足等）时只记录日志，
+            // 不能因为一次点击就让整个终端应用 panic 退出。
+            if let Err(e) = open::that(&url) {
+                crate::config::log(&format!("打开链接失败 {url}: {e}"));
+            }
         }
     }
 

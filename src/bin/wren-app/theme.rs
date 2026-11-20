@@ -147,8 +147,11 @@ impl TerminalTheme {
                         _ => &self.palette.background,
                     };
 
-                    return hex_to_color(color)
-                        .unwrap_or_else(|_| panic!("invalid color {}", color));
+                    // 配色串可能被手动改坏；遇到非法值回退为默认前景色，而不是让整个终端崩溃。
+                    return hex_to_color(color).unwrap_or_else(|_| {
+                        crate::config::log(&format!("主题颜色无效，已回退为默认色: {color}"));
+                        hex_to_color(&self.palette.foreground).unwrap_or(Color32::WHITE)
+                    });
                 }
 
                 // Other colors
@@ -198,21 +201,56 @@ impl TerminalTheme {
                     _ => &self.palette.background,
                 };
 
-                hex_to_color(color)
-                    .unwrap_or_else(|_| panic!("invalid color {}", color))
+                // 非法颜色值不应终止程序：记录一次并回退到默认前景色。
+                hex_to_color(color).unwrap_or_else(|_| {
+                    crate::config::log(&format!("主题颜色无效，已回退为默认色: {color}"));
+                    hex_to_color(&self.palette.foreground).unwrap_or(Color32::WHITE)
+                })
             },
         }
     }
 }
 
 fn hex_to_color(hex: &str) -> anyhow::Result<Color32> {
-    if hex.len() != 7 {
+    // 先确认是 6 位 ASCII 十六进制，再按字节切片；
+    // 这样即使配置里是 `#中文字` 这类多字节字符串也不会触发 UTF-8 边界 panic。
+    let s = hex.trim();
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(anyhow::format_err!("input string is in non valid format"));
     }
 
-    let r = u8::from_str_radix(&hex[1..3], 16)?;
-    let g = u8::from_str_radix(&hex[3..5], 16)?;
-    let b = u8::from_str_radix(&hex[5..7], 16)?;
+    let r = u8::from_str_radix(&s[0..2], 16)?;
+    let g = u8::from_str_radix(&s[2..4], 16)?;
+    let b = u8::from_str_radix(&s[4..6], 16)?;
 
     Ok(Color32::from_rgb(r, g, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_to_color_rejects_bad_input_without_panicking() {
+        assert!(hex_to_color("#d8d8d8").is_ok());
+        assert!(hex_to_color("d8d8d8").is_ok());
+        // 多字节字符串长度也是 7 字节左右，旧实现会在切片处 panic。
+        assert!(hex_to_color("#中文字").is_err());
+        assert!(hex_to_color("#zzzzzz").is_err());
+        assert!(hex_to_color("").is_err());
+        assert!(hex_to_color("#12345").is_err());
+        assert!(hex_to_color("#1234567").is_err());
+    }
+
+    #[test]
+    fn invalid_palette_color_falls_back() {
+        let mut palette = ColorPalette::default();
+        palette.red = "#中文字".into();
+        palette.dim_blue = "not-a-color".into();
+        let theme = TerminalTheme::new(Box::new(palette));
+        // 不应 panic，返回一个可用颜色。
+        let _ = theme.get_color(ansi::Color::Indexed(1));
+        let _ = theme.get_color(ansi::Color::Named(NamedColor::DimBlue));
+    }
 }

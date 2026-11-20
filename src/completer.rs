@@ -64,7 +64,11 @@ impl ShellHelper {
 
     fn complete_file(&self, word: &str) -> Vec<String> {
         let (dir_part, name_part) = match word.rfind('/') {
-            Some(i) => (&word[..=i], &word[i + 1..]),
+            // rfind 返回 '/' 的字节位置，切片天然在边界上；get 再兜底一层。
+            Some(i) => (
+                word.get(..=i).unwrap_or(word),
+                word.get(i + 1..).unwrap_or(""),
+            ),
             None => ("", word),
         };
         let cwd = self.cwd.read().map(|g| g.clone()).unwrap_or_default();
@@ -117,20 +121,32 @@ fn scan_path_commands(path_var: &str) -> Vec<String> {
     names
 }
 
+/// 计算光标前最后一个分隔符之后的起始字节位置。
+///
+/// 分隔符本身可能是多字节字符（例如中文全角空格 U+3000），
+/// 因此必须加上 `len_utf8()` 而不是 `1`，否则会落在字符中间导致切片 panic。
+fn word_start(before: &str) -> usize {
+    before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace() || matches!(c, '|' | '>' | '<' | ';'))
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0)
+}
+
 impl Completer for ShellHelper {
     type Candidate = String;
 
     fn complete(&self, line: &str, pos: usize, _ctx: &RlContext<'_>) -> Result<(usize, Vec<String>), ReadlineError> {
-        let before = &line[..pos];
-        let start = before
-            .rfind(|c: char| c.is_whitespace() || c == '|' || c == '>' || c == '<' || c == ';')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let word = &before[start..];
+        // rustyline 给的 pos 理论上总是字符边界；这里用 get 兜底，
+        // 万一边界不合法（多字节字符/宽字符被截断）也不会 panic。
+        let before = line.get(..pos).unwrap_or(line);
+        let start = word_start(before);
+        let word = before.get(start..).unwrap_or("");
 
         let candidates = if word.starts_with('$') && word.len() > 1 {
-            self.complete_env(&word[1..])
-        } else if start == 0 || before[..start].trim().is_empty() {
+            self.complete_env(word.get(1..).unwrap_or(""))
+        } else if start == 0 || before.get(..start).unwrap_or("").trim().is_empty() {
             self.complete_command(word)
         } else {
             self.complete_file(word)
@@ -180,3 +196,40 @@ impl Hinter for ShellHelper {
 }
 impl Validator for ShellHelper {}
 impl Helper for ShellHelper {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_start_stays_on_char_boundary() {
+        let cases = [
+            "回显\u{3000}中文",
+            "a|b",
+            "cmd > out",
+            "中文",
+            "",
+            "😀 cmd",
+            "a\u{3000}b",
+        ];
+        for s in cases {
+            let i = word_start(s);
+            assert!(s.is_char_boundary(i), "not a char boundary for {s:?}");
+            assert!(i <= s.len());
+        }
+        let line = "回显\u{3000}中文";
+        assert_eq!(&line[word_start(line)..], "中文");
+    }
+
+    #[test]
+    fn complete_file_tolerates_missing_dirs_and_cjk() {
+        let helper = ShellHelper {
+            cwd: Arc::new(RwLock::new(std::env::temp_dir())),
+            env_names: Vec::new(),
+            path_commands: Vec::new(),
+        };
+        // 不存在的目录、中文路径都只应返回空列表，不能 panic。
+        assert!(helper.complete_file("不存在的目录/中文").is_empty());
+        assert!(helper.complete_file("~/完全不存在的目录/x").is_empty());
+    }
+}

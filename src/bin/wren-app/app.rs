@@ -33,6 +33,8 @@ pub struct WrenApp {
     pub editing_profile: Option<u64>,
 
     pub toast: Option<(String, Instant)>,
+    /// 上一帧 UI 代码发生 panic 时的错误摘要，用于在顶部显示恢复横幅。
+    pub crash_notice: Option<String>,
     last_window_size: [f32; 2],
     last_save: Instant,
     top_applied: bool,
@@ -63,6 +65,7 @@ impl WrenApp {
             ssh_form_open: false,
             editing_profile: None,
             toast: None,
+            crash_notice: None,
             last_window_size: initial_size,
             last_save: Instant::now(),
             top_applied: false,
@@ -436,7 +439,65 @@ impl WrenApp {
 }
 
 impl eframe::App for WrenApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // 界面代码里的任何 panic 都被限制在这一帧内：记录日志、显示提示，
+        // 应用继续运行，用户不会因为一次绘制异常而丢失所有终端会话。
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.update_frame(ctx, frame);
+        }));
+        if let Err(payload) = outcome {
+            let msg = panic_text(payload.as_ref());
+            config::log(&format!("UI 帧发生 panic（已恢复运行）: {msg}"));
+            self.crash_notice = Some(msg);
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// 从 panic payload 中提取可读文本。
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "未知 panic".to_string())
+}
+
+impl WrenApp {
+    fn update_frame(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 上一帧发生过 panic 时，顶部显示一条可关闭的错误横幅。
+        if self.crash_notice.is_some() {
+            let mut dismiss = false;
+            egui::TopBottomPanel::top("wren-crash-banner")
+                .frame(
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(122, 32, 32))
+                        .inner_margin(egui::Margin::symmetric(10, 6)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("界面发生错误，已自动恢复运行")
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        );
+                        if let Some(msg) = &self.crash_notice {
+                            ui.label(
+                                egui::RichText::new(msg)
+                                    .color(egui::Color32::from_rgb(255, 220, 220))
+                                    .size(12.0),
+                            );
+                        }
+                        if ui.button("关闭提示").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            if dismiss {
+                self.crash_notice = None;
+            }
+        }
+
         self.handle_events(ctx);
         self.poll_wsl();
         self.handle_shortcuts(ctx);

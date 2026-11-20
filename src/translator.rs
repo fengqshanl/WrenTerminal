@@ -507,12 +507,15 @@ fn translate_service(args: &[String]) -> Translation {
     }
     if args.len() >= 2 {
         let name = args[0].clone();
-        let action = args.last().unwrap().clone();
-        if matches!(
-            action.as_str(),
-            "start" | "stop" | "restart" | "status" | "enable" | "disable" | "is-active"
-        ) {
-            return translate_systemctl(&[action, name]);
+        // `len() >= 2` 已经保证存在最后一个参数；这里用 if-let 再兜底一次，
+        // 以后若调整上面的判断也不会因为 unwrap 而 panic。
+        if let Some(action) = args.last().cloned() {
+            if matches!(
+                action.as_str(),
+                "start" | "stop" | "restart" | "status" | "enable" | "disable" | "is-active"
+            ) {
+                return translate_systemctl(&[action, name]);
+            }
         }
     }
     Translation {

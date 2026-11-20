@@ -30,9 +30,14 @@ use std::io::Write;
 /// GUI 程序在 Release 下没有控制台，崩溃信息只能落到文件里。
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
         let msg = format!(
-            "[{}] panic: {}\n",
+            "[{}] panic (thread={}): {}\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            thread,
             info
         );
         if let Some(path) = config::log_file() {
@@ -144,13 +149,20 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    // 启动失败（显卡驱动异常、窗口创建失败等）时记录日志并返回错误，
+    // 而不是让进程无声无息地消失。
+    let result = eframe::run_native(
         "Wren",
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
             Ok(Box::new(app::WrenApp::new(cc, cfg)))
         }),
-    )
+    );
+    if let Err(e) = &result {
+        config::log(&format!("桌面应用启动/运行失败: {e}"));
+        let _ = std::io::stderr().write_all(format!("Wren 启动失败: {e}\n").as_bytes());
+    }
+    result
 }
 

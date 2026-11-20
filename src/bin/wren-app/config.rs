@@ -102,6 +102,9 @@ impl AppConfig {
                 }
                 Err(e) => {
                     log(&format!("配置文件解析失败，使用默认配置: {e}"));
+                    // 把损坏的文件改名保留，避免下次保存时直接覆盖掉用户数据；
+                    // 用户可以从 app.json.corrupt 里手工找回 SSH 配置。
+                    let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
                     Self::default()
                 }
             },
