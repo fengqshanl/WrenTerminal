@@ -357,6 +357,9 @@ fn run_interactive(stage: &Stage, ctx: &mut Context) -> Output {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    // 等待期间抑制 Wren 自身的 Ctrl+C 退出：Ctrl+C 只结束前台子进程，
+    // Wren 存活并回到提示符（idle 时的 ^C 仍由 rustyline 正常处理）。
+    let _ctrl_guard = winutil::CtrlCGuard::enter();
     match cmd.status() {
         Ok(status) => Output::code(status.code().unwrap_or_else(|| if status.success() { 0 } else { 1 })),
         Err(e) => {
@@ -400,6 +403,8 @@ fn run_captured(stage: &Stage, ctx: &Context, stdin_data: Option<&str>) -> Outpu
         drop(child.stdin.take());
     }
 
+    // 捕获模式下同样保护（例如管道末端是一个长时间运行的程序）。
+    let _ctrl_guard = winutil::CtrlCGuard::enter();
     match child.wait_with_output() {
         Ok(o) => {
             let mut stderr = String::new();
@@ -417,9 +422,61 @@ fn run_captured(stage: &Stage, ctx: &Context, stdin_data: Option<&str>) -> Outpu
     }
 }
 
+/// 判断命令名是否看起来是一个 shell 脚本（供测试与 fallback 共用）。
+fn is_shell_script_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if [".sh", ".bash", ".zsh", ".ksh"].iter().any(|e| lower.ends_with(e)) {
+        return true;
+    }
+    // ./、../ 或绝对路径也可能是无扩展名脚本，需结合文件是否存在判断。
+    name.starts_with("./")
+        || name.starts_with("../")
+        || name.starts_with(".\\")
+        || name.starts_with("..\\")
+        || name.starts_with('/')
+}
+
+/// Windows 无法原生运行 .sh 脚本：`Command::new("./x.sh")` 会报“未找到命令”。
+/// 若检测到脚本，交给 Git Bash 执行，且参数保持原始形式（不经 POSIX→Windows
+/// 转换，避免脚本内部的 GNU 工具参数被破坏）。没有 Git Bash 时返回 None，
+/// 由调用方给出常规“未找到命令”提示。
+fn shell_script_fallback(
+    requested: &str,
+    args: &[String],
+    ctx: &Context,
+) -> Option<(String, Vec<String>, Option<String>)> {
+    if !cfg!(windows) || git_bash_disabled() || !is_shell_script_name(requested) {
+        return None;
+    }
+    let script = ctx.resolve(requested);
+    if !script.is_file() {
+        return None;
+    }
+    // 显式可执行文件交给常规流程。
+    let ext = script
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(ext.as_str(), "exe" | "com" | "bat" | "cmd") {
+        return None;
+    }
+    let bash = winutil::find_git_bash(&ctx.env.get_or("PATH", ""))?;
+    // MSYS bash 接受 POSIX 路径， lexical_normalize 消掉路径中的 `.`/`..`。
+    let posix = pathutil::to_posix(&pathutil::lexical_normalize(&script));
+    let mut bash_args = Vec::with_capacity(args.len() + 1);
+    bash_args.push(posix);
+    bash_args.extend(args.iter().cloned());
+    Some((bash.to_string_lossy().to_string(), bash_args, None))
+}
+
 /// 翻译命令并把 POSIX 风格路径参数转换为 Windows 路径。
 fn prepare_command(stage: &Stage, ctx: &Context) -> (String, Vec<String>, Option<String>) {
     let name = &stage.argv[0];
+    // Shell 脚本优先处理：必须在 translate / 参数路径转换之前，使用原始参数。
+    if let Some(r) = shell_script_fallback(name, &stage.argv[1..], ctx) {
+        return r;
+    }
     let t = translator::translate(name, &stage.argv[1..]);
     let home = ctx.env.home_string();
     let mut args = Vec::new();
@@ -787,6 +844,16 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn detects_shell_script_names() {
+        for name in ["./build.sh", "../x.bash", "/tmp/a.sh", "script.zsh", "a.ksh"] {
+            assert!(is_shell_script_name(name), "{}", name);
+        }
+        for name in ["echo", "git", "npm", "-sh", "build.sh.exe"] {
+            assert!(!is_shell_script_name(name), "{}", name);
+        }
     }
 
     #[test]

@@ -3,6 +3,70 @@
 //! 这里不依赖任何第三方 crate，保持 Wren 单文件、零运行时依赖的特点。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// 正在等待前台子进程的嵌套层数。>0 时 Wren 自己吞掉 Ctrl+C/Break，
+/// 让信号只作用于子进程（子进程与 Wren 共享控制台，会各自收到广播）。
+static CTRL_C_SUPPRESS: AtomicI32 = AtomicI32::new(0);
+
+/// 注册一次控制台 Ctrl 处理器。
+///
+/// rustyline 在读输入时把控制台设为 RAW 模式，Ctrl+C 作为按键被它读取并返回
+/// `Interrupted`（idle 时 ^C 正常）；但子进程运行期间控制台处于正常模式，
+/// Ctrl+C 会以 CTRL_C_EVENT 广播给所有附加进程——若 Wren 不处理，默认行为是
+/// 直接终止 Wren，表现为“停止项目时整个命令行一起结束”。
+/// 控制处理器是否应当吞掉某个 Ctrl 事件（纯函数，便于测试）。
+/// `suppress_count > 0` 表示当前正在等待子进程。
+fn should_swallow_ctrl(ctrl_type: u32, suppress_count: i32) -> bool {
+    const CTRL_C_EVENT: u32 = 0;
+    const CTRL_BREAK_EVENT: u32 = 1;
+    suppress_count > 0 && (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT)
+}
+
+/// 控制台 Ctrl 回调（模块级函数，避免嵌套 extern fn 的函数指针）。
+#[cfg(windows)]
+extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
+    if should_swallow_ctrl(ctrl_type, CTRL_C_SUPPRESS.load(Ordering::SeqCst)) {
+        1 // TRUE：本进程已处理，不要按默认行为退出
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+pub fn install_ctrl_handler() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn install_ctrl_handler() {}
+
+/// RAII 守卫：构造到析构期间抑制 Wren 自身的 Ctrl+C 退出。
+/// 用计数器支持嵌套（管道多阶段顺序执行时安全）。
+pub struct CtrlCGuard;
+
+impl CtrlCGuard {
+    /// 进入“等待子进程”状态。
+    pub fn enter() -> Self {
+        CTRL_C_SUPPRESS.fetch_add(1, Ordering::SeqCst);
+        CtrlCGuard
+    }
+}
+
+impl Drop for CtrlCGuard {
+    fn drop(&mut self) {
+        CTRL_C_SUPPRESS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// 在 PATH 中查找可执行程序。
 ///
@@ -324,5 +388,31 @@ mod tests {
     #[test]
     fn find_missing_program_returns_none() {
         assert!(find_program(r"C:\definitely-not-here", "nope").is_none());
+    }
+
+    #[test]
+    fn ctrl_swallow_only_while_waiting() {
+        // 0=CTRL_C_EVENT, 1=CTRL_BREAK_EVENT, 2+=其它事件（如关闭/注销）
+        assert!(!should_swallow_ctrl(0, 0), "idle 时不能吞掉 Ctrl+C，否则 rustyline 收不到 ^C");
+        assert!(!should_swallow_ctrl(1, 0), "idle 时不能吞掉 Ctrl+Break");
+        assert!(should_swallow_ctrl(0, 1), "等待子进程时应吞掉 Ctrl+C");
+        assert!(should_swallow_ctrl(1, 1), "等待子进程时应吞掉 Ctrl+Break");
+        assert!(!should_swallow_ctrl(2, 1), "不应吞掉控制台关闭等其它事件");
+        assert!(should_swallow_ctrl(0, 3), "嵌套等待时同样吞掉");
+    }
+
+    #[test]
+    fn ctrl_guard_is_balanced_and_nestable() {
+        let base = CTRL_C_SUPPRESS.load(Ordering::SeqCst);
+        {
+            let _g1 = CtrlCGuard::enter();
+            assert_eq!(CTRL_C_SUPPRESS.load(Ordering::SeqCst), base + 1);
+            {
+                let _g2 = CtrlCGuard::enter();
+                assert_eq!(CTRL_C_SUPPRESS.load(Ordering::SeqCst), base + 2);
+            }
+            assert_eq!(CTRL_C_SUPPRESS.load(Ordering::SeqCst), base + 1);
+        }
+        assert_eq!(CTRL_C_SUPPRESS.load(Ordering::SeqCst), base);
     }
 }

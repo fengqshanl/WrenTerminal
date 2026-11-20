@@ -2,9 +2,11 @@
 
 > **Wren**（鹪鹩）—— 一只小巧、敏捷、轻快的鸟。以此命名这个**轻量、无负担**的 Windows Linux 风格命令行兼容层。
 
-一个用 **Rust** 从零实现的、运行在 **Windows 原生控制台**上的 Linux 风格命令行兼容层。
+一个用 **Rust** 从零实现的、运行在 **Windows** 上的 Linux 风格终端与命令行兼容层。
 
-**不依赖 WSL、Cygwin 或 MSYS2**。它提供一个 bash 风格的交互式提示符，把常见 Linux 命令用 Rust 原生实现，并把其它命令自动翻译为 Windows 等价命令执行，同时维护一套 Linux 风格的环境变量（PATH 用 `:` 分隔、HOME/USER 等）并同步给子进程。
+从 **v0.3.0** 起，Wren 提供一个**独立的 Windows 桌面应用**（`wren-app.exe`）：顶部常驻系统状态栏，多标签终端可连接本地 Wren Shell、任意 WSL 发行版以及任意标准 SSH 服务器；登录后状态栏会自动切换并实时显示对应系统的 CPU、内存、磁盘、网络、负载与运行时长。桌面应用不依赖 Windows Terminal，也不需要 WSL 才能运行本地命令。
+
+命令行部分**不依赖 WSL、Cygwin 或 MSYS2**。它提供一个 bash 风格的交互式提示符，把常见 Linux 命令用 Rust 原生实现，并把其它命令自动翻译为 Windows 等价命令执行，同时维护一套 Linux 风格的环境变量（PATH 用 `:` 分隔、HOME/USER 等）并同步给子进程。
 
 像鹪鹩一样：**体积小、启动快、不挑环境**——单个可执行文件，即下即用。
 
@@ -16,9 +18,11 @@
 # 编译（需要 Rust 工具链）
 cargo build --release
 
-# 运行交互式 shell（最简单：双击 run.bat，退出时窗口会保留）
-run.bat
-# 或直接
+# 启动桌面应用（推荐）
+.\target\release\wren-app.exe
+# 或双击 run.bat（优先启动桌面应用）
+
+# 只使用命令行 Shell
 .\target\release\wren.exe
 
 # 批处理方式运行脚本（需显式加 --batch）
@@ -26,23 +30,27 @@ run.bat
 echo "ls -la" | .\target\release\wren.exe --batch
 ```
 
-> 说明：默认始终进入交互式 shell（确保双击/独立窗口启动都能看到提示符）。
+> 说明：命令行 Shell 默认始终进入交互式 shell（确保双击/独立窗口启动都能看到提示符）。
 > 只有显式传入 `--batch`（或 `-b`）才走批处理模式。若崩溃，错误信息会写入
 > `%TEMP%\wren_panic.log`，便于排查。
+>
+> 桌面应用是纯 GUI 程序（Windows 子系统），不会附带控制台窗口；崩溃与运行日志写入
+> `%APPDATA%\Wren\wren-app.log`。
 
-### 安装（MSI）与 Windows Terminal 集成
+### 安装（MSI）
 
 从 [Releases](https://github.com/fengqshanl/WrenTerminal/releases) 下载 `Wren-*-x64.msi` 双击安装即可。安装程序会：
 
-- 把 `wren.exe` 安装到 `C:\Program Files\Wren` 并加入系统 PATH
-- 创建开始菜单与桌面快捷方式
+- 把 `wren-app.exe`（桌面应用）和 `wren.exe`（命令行 Shell）安装到 `C:\Program Files\Wren`
+- 创建桌面 / 开始菜单的 **Wren** 快捷方式（启动桌面应用）以及 **Wren 命令行** 快捷方式
+- 把安装目录加入系统 PATH
 - **自动把 "Wren Terminal" 注册为 Windows Terminal 的一个 profile**（正式版与预览版都支持，所有用户账户）——安装完后新开一个 Terminal 标签页，下拉菜单里就能直接选到 Wren，无需手动执行任何脚本
 - 卸载时自动清理该 profile
 
 > 这个自动集成由 MSI 内置的自定义操作完成（安装时以 SYSTEM 权限遍历各用户的 Terminal 配置），对应的脚本是 `installer/staging/wren-terminal-profile.ps1`；日志写在 `%TEMP%\wren-terminal-profile.log`。
-> 如果你用的是免安装的绿色版（直接拷 `wren.exe`），可以手动运行该脚本：`powershell -ExecutionPolicy Bypass -File wren-terminal-profile.ps1 -Mode Install`。
+> 如果你用的是免安装的绿色版（直接拷可执行文件），可以手动运行该脚本：`powershell -ExecutionPolicy Bypass -File wren-terminal-profile.ps1 -Mode Install`。
 
-进入后你会看到熟悉的提示符：
+命令行版本启动后你会看到熟悉的提示符：
 
 ```
    _   _   ____    _____   _   _
@@ -52,7 +60,7 @@ echo "ls -la" | .\target\release\wren.exe --batch
  \ \_/ / | |_) | |_____| | | \ |
   \___/  |____/          |_|  \_
 
- Wren v0.2.3  — A lightweight Linux-style shell on Windows (no WSL)
+ Wren v0.3.0  — A lightweight Linux-style shell for Windows
  欢迎, zhangzhe ! 输入 help 查看可用命令，exit 退出。
  提示: 支持管道 | · 重定向 > >> < · 变量 $VAR · 历史 ↑/↓ · 补全 Tab
 
@@ -60,6 +68,54 @@ zhangzhe@ZHE:~$ echo hello
 hello
 zhangzhe@ZHE:~$
 ```
+
+---
+
+## 桌面应用（Wren App）
+
+`wren-app.exe` 是一个独立的 Windows 桌面终端，不依赖 Windows Terminal，也不需要 WSL 即可运行本地 Wren 命令。
+
+### 固定状态栏
+- 顶部常驻，不随终端滚动；始终显示当前会话的目标系统
+- 指标：CPU 使用率（含每核详情）、内存 / 交换分区、系统盘 / 根分区、网络实时速率、负载、运行时长、进程数、SSH 时延、本地时间
+- **登录 WSL 或 SSH 后自动切换**：状态栏会显示远端 `/proc` 中的真实数据，而不是本机数据
+- 点击 **详情**（或按 F12）展开右侧面板：CPU 型号与每核心占用、完整磁盘分区、网卡地址与速率、Top 进程、远端时间与时钟偏差、数据更新时间
+- 数据刷新：本地 1.5 秒、WSL 4 秒、SSH 8 秒
+
+### 多标签终端
+- 本地 Wren Shell、WSL 发行版、任意标准 SSH 服务器可以同时开在多个标签页
+- 标签页显示连接状态点；会话退出后保留最后的屏幕内容，可直接“重新连接”
+- 终端支持 ANSI 16/256 色、中文宽字符、鼠标选择复制、Ctrl+C / Ctrl+V、滚轮与右侧可拖动的历史滚动条
+- 窗口右下角状态与快捷键：
+  - `Ctrl+Shift+T` 新建本地终端
+  - `Ctrl+Shift+N` 打开连接管理器
+  - `Ctrl+Shift+W` 关闭当前标签
+  - `Ctrl+Tab` / `Ctrl+Shift+Tab` 切换标签
+  - `Alt+1…9` 跳到指定标签
+  - `Ctrl+=` / `Ctrl+-` / `Ctrl+0` 调整终端字号
+  - `F12` 展开/收起系统详情
+  - 状态栏 **置顶** 按钮可手动切换窗口置顶（默认关闭，不会自动置顶）
+
+### 连接 WSL
+1. 点击右上角 **＋ 连接** 或按 `Ctrl+Shift+N`
+2. 选择 **WSL 发行版**，应用会自动运行 `wsl.exe -l -v` 检测已安装的发行版
+3. 点击发行版右侧的 **连接**，或使用“默认发行版”
+
+WSL 会话以 `wsl.exe -d <distro> --cd ~` 启动；状态栏通过 `wsl.exe ... sh -c` 读取远端 `/proc`，无需额外配置。
+
+### 连接 SSH 服务器
+1. 打开连接管理器，切换到 **SSH 服务器**
+2. 点击 **＋ 新建 SSH 连接**，填写名称、主机、用户名、端口（默认 22），可选私钥路径
+3. 保存后即可一键连接；配置保存在 `%APPDATA%\Wren\app.json`
+
+SSH 使用系统自带的 `ssh.exe`，支持密码、密钥、ssh-agent 与首次连接的主机指纹确认。若希望顶部状态栏显示远端系统数据，需要**免密登录**（SSH 密钥或 ssh-agent）：状态采集会为每次轮询建立一个独立的 `ssh` 连接，无法在非交互模式下输入密码。状态栏会显示“状态离线”并在详情面板给出提示；终端本身不受影响。
+
+> 远端状态采集依赖 Linux 的 `/proc`，适用于绝大多数 Linux 服务器。非 Linux 目标仍可正常打开终端，只是状态栏可能显示为离线。
+
+### 配置与日志
+- 配置：`%APPDATA%\Wren\app.json`（SSH 服务器、窗口大小、字号、置顶、详情面板状态）
+- 日志：`%APPDATA%\Wren\wren-app.log`
+- 终端组件基于 [alacritty_terminal](https://github.com/alacritty/alacritty) 与 [egui_term](https://github.com/Harzu/egui-term)（MIT），已按本项目需要做了 Windows 线程与输入修复，许可证见 `src/bin/wren-app/LICENSE-egui_term`。
 
 ---
 
@@ -240,8 +296,17 @@ df -h
 
 ```
 src/
-├── main.rs          # 程序入口 + panic 日志钩子
-├── lib.rs           # 模块声明
+├── main.rs          # 命令行 Shell 入口 + panic 日志钩子
+├── lib.rs           # 命令行模块声明
+├── bin/wren-app/    # 独立桌面应用
+│   ├── main.rs      # GUI 入口、字体、panic/日志
+│   ├── app.rs       # 应用状态、标签页、会话生命周期、快捷键
+│   ├── ui.rs        # 顶部状态栏、详情面板、标签栏、终端区域、主题
+│   ├── connect.rs   # 本地 / WSL / SSH 连接窗口与 SSH 配置表单
+│   ├── session.rs   # 会话创建（wren.exe / wsl.exe / ssh.exe）
+│   ├── stats.rs     # 本地 sysinfo 与远端 /proc 状态采集
+│   ├── config.rs    # %APPDATA%\Wren\app.json 持久化
+│   ├── view.rs 等   # 基于 egui_term / alacritty_terminal 的终端部件
 ├── shell.rs         # REPL 主循环、提示符、启动界面、批处理模式、Windows 控制台初始化
 ├── parser.rs        # 分词、引号、变量展开、管道/重定向/连接符解析
 ├── globber.rs       # shell 风格通配符展开（* ? [a-z]，含隐藏文件规则）

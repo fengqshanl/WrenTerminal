@@ -6,7 +6,7 @@
     Id="*"
     Name="Wren - Linux-style shell on Windows"
     Language="1033"
-    Version="0.2.3.0"
+    Version="0.3.0.0"
     Manufacturer="Wren Terminal"
     UpgradeCode="A7E4C1D2-9F3B-4E68-B2A1-6D0C5E8F7A31">
 
@@ -17,7 +17,7 @@
       InstallScope="perMachine"
       Description="Wren - A lightweight Linux-style command-line compatibility shell for Windows"
       Manufacturer="Wren Terminal"
-      Keywords="shell, linux, terminal, cli, windows" />
+      Keywords="shell, linux, terminal, cli, windows, wsl, ssh" />
 
     <!-- 媒体模板：生成单个 CAB，压缩进 MSI -->
     <MediaTemplate EmbedCab="yes" />
@@ -48,6 +48,12 @@
               Name="wren.exe"
               Source="staging\wren.exe"
               KeyPath="yes"
+              DiskId="1" />
+            <!-- 独立桌面应用：固定状态栏 + 多标签终端（本地 / WSL / SSH） -->
+            <File
+              Id="WrenAppExe"
+              Name="wren-app.exe"
+              Source="staging\wren-app.exe"
               DiskId="1" />
             <File Id="README.md" Name="README.md" Source="staging\README.md" DiskId="1" />
             <File Id="run.bat" Name="run.bat" Source="staging\run.bat" DiskId="1" />
@@ -81,8 +87,15 @@
       <Component Id="StartMenuShortcuts" Guid="5F8A2C19-7B34-4E56-A901-3C2D8E4F1B67" Win64="yes">
         <Shortcut
           Id="WrenStartMenu"
-          Name="Wren Terminal"
-          Description="Linux-style shell on Windows"
+          Name="Wren"
+          Description="Wren desktop terminal (local / WSL / SSH)"
+          Target="[INSTALLFOLDER]wren-app.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="WrenIcon" />
+        <Shortcut
+          Id="WrenCliStartMenu"
+          Name="Wren CLI"
+          Description="Wren Linux-style command-line shell"
           Target="[INSTALLFOLDER]wren.exe"
           WorkingDirectory="INSTALLFOLDER"
           Icon="WrenIcon" />
@@ -108,9 +121,9 @@
       <Component Id="DesktopShortcut" Guid="9D3E7B42-1A85-4C6F-B0D2-8E5A1F4C7D93" Win64="yes">
         <Shortcut
           Id="WrenDesktop"
-          Name="Wren Terminal"
-          Description="Linux-style shell on Windows"
-          Target="[INSTALLFOLDER]wren.exe"
+          Name="Wren"
+          Description="Wren desktop terminal (local / WSL / SSH)"
+          Target="[INSTALLFOLDER]wren-app.exe"
           WorkingDirectory="INSTALLFOLDER"
           Icon="WrenIcon" />
         <RegistryValue

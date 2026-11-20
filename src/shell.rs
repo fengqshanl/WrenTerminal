@@ -19,6 +19,8 @@ use std::sync::{Arc, RwLock};
 /// 启动交互式 shell，返回进程退出码。
 pub fn run() -> i32 {
     enable_windows_utf8();
+    // 让 Wren 在等待前台子进程时不被 Ctrl+C 一起终止（见 winutil 说明）。
+    crate::winutil::install_ctrl_handler();
 
     let exe = std::env::current_exe()
         .ok()
@@ -239,7 +241,7 @@ fn print_banner(ctx: &Context) {
     println!(
         "  {}  {}",
         format!("Wren v{}", version).bold(),
-        "— A lightweight Linux-style shell on Windows (no WSL)".dimmed()
+        "— A lightweight Linux-style shell for Windows".dimmed()
     );
     println!("  {} {} {}", "欢迎,".dimmed(), user.green(), "! 输入 help 查看可用命令，exit 退出。".dimmed());
     println!("  {} {}", "提示:".dimmed(), "支持管道 | · 重定向 > >> < · 变量 $VAR · 历史 ↑/↓ · 补全 Tab".yellow());

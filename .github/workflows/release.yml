@@ -35,6 +35,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path installer/staging | Out-Null
           Copy-Item target/release/wren.exe installer/staging/
+          Copy-Item target/release/wren-app.exe installer/staging/
           Copy-Item README.md installer/staging/
           Copy-Item run.bat installer/staging/
           # wren.ico 与 wren-terminal-profile.ps1 已在仓库 staging 目录中，无需复制
@@ -59,15 +60,24 @@ jobs:
         with:
           name: "Wren ${{ github.ref_name }}"
           body: |
-            ## Wren ${{ github.ref_name }} — Linux-style shell on Windows
+            ## Wren ${{ github.ref_name }} — 桌面终端 + Linux 风格 Shell
 
-            轻量、无 WSL 依赖的 Windows Linux 风格命令行兼容层。
+            一个独立的 Windows 终端应用：顶部常驻系统状态栏，多标签连接本地 Wren、任意 WSL 发行版和任意 SSH 服务器。
 
             ### 下载
             - **Wren-${{ github.ref_name }}-x64.msi** — Windows x64 安装包
-              （自动安装到 Program Files、创建开始菜单/桌面快捷方式、加入 PATH）
+              （安装到 Program Files，创建“Wren”桌面/开始菜单快捷方式，同时保留命令行 Shell）
 
-            ### 主要功能
+            ### 桌面应用
+            - 顶部固定状态栏：CPU / 内存 / 磁盘 / 网络 / 负载 / 运行时长 / 时延 / 进程数
+            - 登录 WSL 或 SSH 后，状态栏自动切换为该服务器的实时状态
+            - 多标签终端，支持本地 Wren、WSL 发行版与任意标准 SSH 服务器
+            - SSH 服务器配置可保存、编辑，一键连接
+            - 点击状态栏或 F12 展开详细系统面板（CPU 核心、磁盘分区、网卡、进程等）
+            - 可拖动的终端历史滚动条；窗口置顶按钮
+            - 无控制台窗口，双击即用；配置保存在 `%APPDATA%\Wren\app.json`
+
+            ### 命令行 Shell
             - Rust 原生实现 40+ Linux 常用命令
             - `apt` / `apt-get` 包管理（winget 后端，支持 install/update/download 等）
             - `sudo` 透明前缀；npm / pnpm / yarn 等 `.cmd` shim 可直接运行
@@ -77,6 +87,8 @@ jobs:
             - 管道 `|`、重定向 `> >> <`、连接符 `&& || ;`
             - Linux 风格环境变量与 PATH 同步
             - Tab 补全、历史记录、彩色提示符
+
+            > SSH 状态栏轮询需要免密登录（SSH 密钥或 ssh-agent）；WSL 状态由 `wsl.exe` 直接读取。
 
             详见 [README](https://github.com/fengqshanl/WrenTerminal/blob/main/README.md)。
           files: Wren-${{ github.ref_name }}-x64.msi
