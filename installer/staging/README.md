@@ -60,7 +60,7 @@ echo "ls -la" | .\target\release\wren.exe --batch
  \ \_/ / | |_) | |_____| | | \ |
   \___/  |____/          |_|  \_
 
- Wren v0.3.1  — A lightweight Linux-style shell for Windows
+ Wren v0.3.2  — A lightweight Linux-style shell for Windows
  欢迎, zhangzhe ! 输入 help 查看可用命令，exit 退出。
  提示: 支持管道 | · 重定向 > >> < · 变量 $VAR · 历史 ↑/↓ · 补全 Tab
 
